@@ -1,5 +1,6 @@
+# requirements.txt
 pandas
 numpy
 yfinance
 streamlit
-TA-Lib==0.4.24  # Use the capital letters and a specific version
+pandas-ta
