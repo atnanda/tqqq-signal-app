@@ -1,13 +1,13 @@
 import pandas as pd
 import yfinance as yf
-import talib as ta
+# NOTE: ta-lib is replaced by pandas-ta for easy cloud deployment
+import pandas_ta as pta 
 from datetime import datetime, timedelta
-import numpy as np
 import warnings
 import streamlit as st
 
-# Suppress the specific FutureWarning about auto_adjust
-warnings.filterwarnings("ignore", category=FutureWarning)
+# Suppress warnings (especially those that can arise during yfinance data parsing)
+warnings.filterwarnings("ignore")
 
 # --- Configuration (Constants) ---
 TICKER = "QQQ"
@@ -16,89 +16,95 @@ ATR_PERIOD = 14
 ATR_MULTIPLIER = 2.0
 SMA_PERIOD = 200
 
-# --- Helper Functions (Same as before) ---
+# Initialize Session State for the real-time toggle
+if 'use_realtime' not in st.session_state:
+    st.session_state['use_realtime'] = False
 
-def get_market_end_date(target_date):
-    """Calculates the end date for yfinance (day *after* the target trading day)."""
-    return datetime.combine(target_date, datetime.min.time()) + timedelta(days=1)
+# --- Helper Functions ---
 
-@st.cache_data(ttl=60*60*4) # Cache the data fetch for 4 hours to avoid rate limits
-def fetch_and_calculate_data(target_date):
-    """Fetches data and calculates all indicators for the target date."""
+# Cache data for 4 hours to reduce API calls and speed up interaction
+@st.cache_data(ttl=60*60*4) 
+def get_realtime_price_live(ticker):
+    """Fetches the current, non-historical price using yfinance Ticker info."""
+    try:
+        ticker_obj = yf.Ticker(ticker)
+        # Use 'currentPrice' for the most up-to-date quote
+        price = ticker_obj.info.get('currentPrice') or ticker_obj.info.get('regularMarketPrice')
+        if price is None:
+             raise ValueError("Could not find a valid real-time price in yfinance info.")
+        return price
+    except Exception as e:
+        st.error(f"Error fetching real-time price for {ticker}: {e}")
+        return None
+
+@st.cache_data(ttl=60*60*4) 
+def fetch_historical_data(target_date):
+    """
+    Fetches historical data up to the trading day *prior* to the target date.
+    This ensures indicators (SMA/EMA/ATR) are calculated based on data 
+    available at the close of the day before the signal price is applied.
+    """
     
-    market_end_date = get_market_end_date(target_date)
-    # Fetch enough data for 200 SMA + buffer
-    start_date_daily = target_date - timedelta(days=400) 
-
-    # --- 1. Get Daily Data ---
+    # We need data up to the day *before* the signal price date.
+    indicator_end_date = target_date 
+    start_date_daily = indicator_end_date - timedelta(days=400) # Ensure enough data for 200 SMA
+    
     daily_data = yf.download(TICKER, 
                              start=start_date_daily, 
-                             end=market_end_date, 
+                             end=indicator_end_date, 
                              interval="1d", 
                              progress=False)
     
-    # CRITICAL CLEANING STEP FOR HISTORICAL DATA
-    if daily_data.empty:
-        return "ERROR: No data fetched from Yahoo Finance.", None
-        
-    # 1. Drop the last row (which may be a partial day or empty)
-    if daily_data.index[-1].date() >= target_date:
-        daily_data = daily_data.iloc[:-1].copy() 
-
-    # 2. Drop all rows with NaNs (required before TA-Lib calculation)
+    # Drop NaNs
     daily_data.dropna(inplace=True)
     
-    # --- 2. Validation ---
     if daily_data.empty or daily_data.shape[0] < SMA_PERIOD:
-        return f"ERROR: Insufficient clean data ({daily_data.shape[0]} points) to calculate 200-Day SMA.", None
-
-    # --- 3. Intraday Data Proxy (The Close Price for the Target Date) ---
-    intraday_data_proxy = daily_data.tail(1).copy() 
-
-    # --- 4. Calculate Indicators ---
-    try:
-        # CRITICAL: Force to float, convert to NumPy, and then FLATTEN to ensure 1D array (N,)
-        close_prices = daily_data['Close'].astype(float).to_numpy().flatten()
-        high_prices = daily_data['High'].astype(float).to_numpy().flatten()
-        low_prices = daily_data['Low'].astype(float).to_numpy().flatten()
+        return None
         
-        # Calculate Indicators
-        daily_data['SMA_200'] = ta.SMA(close_prices, timeperiod=SMA_PERIOD)
-        daily_data['EMA_5'] = ta.EMA(close_prices, timeperiod=EMA_PERIOD)
-        daily_data['ATR'] = ta.ATR(high_prices, low_prices, close_prices, timeperiod=ATR_PERIOD)
+    return daily_data
 
-        # Extract scalar values
-        current_price = intraday_data_proxy['Close'].iloc[-1].item()
-        current_sma_200 = daily_data['SMA_200'].iloc[-1].item()
-        latest_ema_5 = daily_data['EMA_5'].iloc[-1].item()
-        latest_atr = daily_data['ATR'].iloc[-1].item()
+def calculate_indicators(data_daily, final_signal_price):
+    """Calculates all indicators using pandas-ta."""
+    
+    # Use pandas_ta.extend() to add the .ta accessor
+    data_daily.ta.append(data_daily, as_df=True)
+    
+    # --- 1. 200-Day SMA ---
+    # pandas-ta syntax: data_daily.ta.sma(length=period, append=True)
+    data_daily.ta.sma(length=SMA_PERIOD, append=True)
+    # pandas-ta names the column 'SMA_200' by default
+    current_sma_200 = data_daily[f'SMA_{SMA_PERIOD}'].iloc[-1].item()
+    
+    # --- 2. 5-Day EMA ---
+    data_daily.ta.ema(length=EMA_PERIOD, append=True)
+    latest_ema_5 = data_daily[f'EMA_{EMA_PERIOD}'].iloc[-1].item()
 
-        indicators = {
-            'current_price': current_price,
-            'sma_200': current_sma_200,
-            'ema_5': latest_ema_5,
-            'atr': latest_atr
-        }
-        return "SUCCESS", indicators
-        
-    except Exception as e:
-        return f"FATAL ERROR calculating indicators: {e}", None
+    # --- 3. 14-Day ATR ---
+    data_daily.ta.atr(length=ATR_PERIOD, append=True)
+    latest_atr = data_daily[f'ATR_{ATR_PERIOD}'].iloc[-1].item()
+
+    return {
+        'current_price': final_signal_price, # The price used for the signal
+        'sma_200': current_sma_200,
+        'ema_5': latest_ema_5,
+        'atr': latest_atr
+    }
 
 def generate_signal(indicators):
-    """Applies the trading strategy logic."""
+    """Applies the trading strategy logic (VASL & DMA)."""
     price = indicators['current_price']
     sma_200 = indicators['sma_200']
     ema_5 = indicators['ema_5']
     atr = indicators['atr']
 
-    # Volatility Stop-Loss (VASL)
+    # 1. Volatility Stop-Loss (VASL)
     vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)
     
     if price < vasl_trigger_level:
         final_signal = "**SELL TQQQ / CASH (Exit)**"
         conviction_status = "VASL Triggered"
     else:
-        # Conviction Filter (DMA)
+        # 2. Conviction Filter (DMA)
         dma_bull = (price >= sma_200)
         
         if dma_bull:
@@ -112,78 +118,134 @@ def generate_signal(indicators):
 
 # --- Streamlit Application Layout ---
 
-st.title("TQQQ/SQQQ Daily Signal Generator")
+def toggle_realtime():
+    """Callback function to toggle the real-time state and clear cache."""
+    # Clearing cache ensures the historical data fetch is rerun correctly
+    st.cache_data.clear()
+
+st.set_page_config(page_title="TQQQ/SQQQ Signal", layout="wide")
+st.title("📈 TQQQ/SQQQ Daily Signal Generator")
+st.markdown("A strategy based on 200-Day SMA (Conviction) and EMA/ATR (Volatility Stop-Loss).")
 st.markdown("---")
 
-# 1. Date Input Sidebar
+# 1. Date/Price Input and Real-time Button in Sidebar
 today = datetime.today().date()
-yesterday = today - timedelta(days=1)
-# Default to the most recent weekday's close (usually yesterday)
-if yesterday.weekday() > 4:
-    # Find the last Friday
-    days_back = yesterday.weekday() - 4 
-    default_date = yesterday - timedelta(days=days_back)
-else:
-    default_date = yesterday
+# Default to yesterday for historical data
+default_date = today - timedelta(days=max(1, today.weekday() - 4) if today.weekday() > 4 else 1)
 
-st.sidebar.header("Select Date")
-# The user selects the date for the signal
-target_date = st.sidebar.date_input(
-    "Signal Date (Close of Day)",
-    value=default_date,
-    max_value=today - timedelta(days=1)
+st.sidebar.header("Data Source Selection")
+
+# Use a toggle to manage the real-time state
+realtime_toggle = st.sidebar.toggle(
+    "Use **Real-Time** Market Price",
+    value=st.session_state['use_realtime'],
+    on_change=toggle_realtime,
+    key='realtime_toggle'
 )
+st.session_state['use_realtime'] = realtime_toggle 
 
-# Check for weekends
-if target_date.weekday() > 4:
-    st.error(f"**{target_date.strftime('%Y-%m-%d')} is a weekend.** Please select a trading day.")
-    st.stop()
+# Conditional Date Input
+if st.session_state['use_realtime']:
+    target_date = today # Indicators will use data up to yesterday's close
+    signal_date_text = f"**Current Market** ({datetime.now().strftime('%Y-%m-%d %H:%M:%S %Z')})"
+    st.sidebar.markdown(f"*(Indicators are calculated from data up to the close of: **{today - timedelta(days=1)}**)*")
+    
+    # Attempt to fetch the real-time price for the signal
+    final_signal_price = get_realtime_price_live(TICKER)
+    price_source_label = "Live Market Price"
+    if final_signal_price is None:
+        st.error("Cannot proceed without a live price.")
+        st.stop()
+        
+else:
+    # Historical Close Mode: Date Input
+    target_date = st.sidebar.date_input(
+        "Historical **Signal Date** (Close Price)",
+        value=default_date,
+        max_value=today
+    )
+    
+    # Check for weekends/future if using historical close
+    if target_date.weekday() > 4:
+        st.error(f"**{target_date.strftime('%Y-%m-%d')} is a weekend.** Please select a trading day.")
+        st.stop()
+        
+    indicator_data_date = target_date - timedelta(days=1)
+    st.sidebar.markdown(f"*(Indicators are calculated from data up to the close of: **{indicator_data_date.strftime('%Y-%m-%d')}**)*")
+    signal_date_text = f"Close of **{target_date.strftime('%Y-%m-%d')}**"
+    price_source_label = f"Historical Close ({target_date.strftime('%Y-%m-%d')})"
+    
+    # Price will be determined in step 3 after fetching data
+    final_signal_price = None
 
 # 2. Execute Strategy
-st.header(f"Signal for QQQ Close on: {target_date.strftime('%Y-%m-%d')}")
-st.info("Fetching data for QQQ...")
+st.header(f"Signal based on {TICKER} Price at: {signal_date_text}")
+st.info(f"Fetching historical data for indicators up to the day before {target_date.strftime('%Y-%m-%d')}...")
 
-status, indicators = fetch_and_calculate_data(target_date)
+# Fetch historical data (used for SMA, EMA, ATR calculation)
+daily_data = fetch_historical_data(target_date)
 
-if status.startswith("ERROR") or indicators is None:
-    st.error(status)
-else:
+if daily_data is None:
+    st.error("FATAL ERROR: Insufficient data to calculate long-term indicators (200-Day SMA).")
+    st.stop()
+    
+# 3. Determine Final Signal Price (if not already set by real-time fetch)
+if final_signal_price is None:
+    # Fetch the close price for the target date
+    try:
+        data_with_signal_price = yf.download(TICKER, 
+                                             start=target_date, 
+                                             end=target_date + timedelta(days=1), 
+                                             interval="1d", 
+                                             progress=False)
+        final_signal_price = data_with_signal_price['Close'].iloc[-1].item()
+    except Exception as e:
+        st.error(f"FATAL ERROR: Could not find a valid close price for {target_date.strftime('%Y-%m-%d')}.")
+        st.stop()
+    
+# 4. Calculate Indicators and Generate Signal
+try:
+    indicators = calculate_indicators(daily_data, final_signal_price)
     final_signal, conviction_status, vasl_level = generate_signal(indicators)
+except Exception as e:
+    st.error(f"FATAL ERROR during calculation or signal generation: {e}")
+    st.stop()
 
-    # 3. Display Results
-    
-    # Signal Box
-    if "TQQQ" in final_signal:
-        st.success(f"## {final_signal}")
-    elif "SQQQ" in final_signal:
-        st.warning(f"## {final_signal}")
-    else: # SELL / CASH
-        st.error(f"## {final_signal}")
+# 5. Display Results
+st.markdown("---")
 
-    st.markdown("---")
-    
-    # Detail Metrics
-    col1, col2, col3 = st.columns(3)
-    
-    col1.metric("Current Price (QQQ Close)", f"${indicators['current_price']:.2f}")
-    col2.metric("200-Day SMA", f"${indicators['sma_200']:.2f}")
-    col3.metric("DMA Conviction", conviction_status)
+# Signal Box Display
+if "BUY TQQQ" in final_signal:
+    st.success(f"## {final_signal}")
+elif "BUY SQQQ" in final_signal:
+    st.warning(f"## {final_signal}")
+else: # SELL / CASH
+    st.error(f"## {final_signal}")
 
-    col_details, col_vasl = st.columns(2)
-    
-    with col_details:
-        st.subheader("Volatility Metrics")
-        st.markdown(f"**5-Day EMA:** ${indicators['ema_5']:.2f}")
-        st.markdown(f"**14-Day ATR:** ${indicators['atr']:.2f}")
+st.markdown(f"**Price Source:** *{price_source_label}*")
+st.markdown("---")
 
-    with col_vasl:
-        st.subheader("Stop-Loss (VASL)")
-        if "Triggered" in conviction_status:
-            st.error(f"**Trigger Level:** ${vasl_level:.2f}")
-            st.error(f"Price is below the VASL level.")
-        else:
-            st.success(f"**Trigger Level:** ${vasl_level:.2f}")
-            st.markdown("Price is **ABOVE** the VASL level.")
+# Detail Metrics
+col1, col2, col3 = st.columns(3)
+
+col1.metric("Signal Price (QQQ)", f"${indicators['current_price']:.2f}")
+col2.metric("200-Day SMA", f"${indicators['sma_200']:.2f}")
+col3.metric("DMA Conviction", conviction_status)
+
+st.subheader("Strategy Details")
+col_details, col_vasl = st.columns(2)
+
+with col_details:
+    st.markdown(f"**5-Day EMA:** ${indicators['ema_5']:.2f}")
+    st.markdown(f"**14-Day ATR:** ${indicators['atr']:.2f}")
+
+with col_vasl:
+    if "Triggered" in conviction_status:
+        st.error(f"**VASL Trigger Level:** ${vasl_level:.2f}")
+        st.error(f"Price (${indicators['current_price']:.2f}) is below the stop-loss level.")
+    else:
+        st.success(f"**VASL Trigger Level:** ${vasl_level:.2f}")
+        st.markdown(f"Price (${indicators['current_price']:.2f}) is **ABOVE** the VASL level.")
 
 st.markdown("---")
 st.markdown(f"Strategy Ticker: **{TICKER}** | ATR Multiplier: **{ATR_MULTIPLIER}**")
