@@ -24,8 +24,8 @@ if 'use_realtime' not in st.session_state:
 
 def clean_yfinance_columns(df):
     """
-    Ensures column names are simple strings (e.g., 'Close' instead of ('Close', 'QQQ'))
-    to prevent MultiIndex and Tuple access errors in pandas-ta.
+    Ensures column names are simple strings and explicitly forces them to the 
+    standard lowercase expected by pandas-ta ('open', 'high', 'low', 'close').
     """
     # 1. Ensure column headers are flat
     if isinstance(df.columns, pd.MultiIndex):
@@ -41,6 +41,12 @@ def clean_yfinance_columns(df):
             new_cols.append(col)
             
     df.columns = new_cols
+
+    # --- CRITICAL NEW STEP: Normalize to Lowercase ---
+    # This is the most reliable column naming standard for pandas-ta.
+    df.columns = df.columns.str.lower()
+    # --- END CRITICAL STEP ---
+
     return df
 
 # --- Data Fetching Functions ---
@@ -89,6 +95,7 @@ def calculate_indicators(data_daily, final_signal_price):
     """Calculates all indicators using pandas-ta."""
     
     # 1. 200-Day SMA (Column: 'SMA_200')
+    # Uses the 'close' column which is now guaranteed to be present and lowercase
     data_daily.ta.sma(length=SMA_PERIOD, append=True)
     current_sma_200 = data_daily[f'SMA_{SMA_PERIOD}'].iloc[-1].item()
     
@@ -97,7 +104,10 @@ def calculate_indicators(data_daily, final_signal_price):
     latest_ema_5 = data_daily[f'EMA_{EMA_PERIOD}'].iloc[-1].item()
 
     # 3. 14-Day ATR (Column: 'ATR_14')
+    # pandas-ta automatically finds 'high', 'low', and 'close'
     data_daily.ta.atr(length=ATR_PERIOD, append=True)
+    
+    # FATAL ERROR FIX: The column 'ATR_14' must now exist since inputs were cleaned
     latest_atr = data_daily[f'ATR_{ATR_PERIOD}'].iloc[-1].item()
 
     return {
@@ -212,7 +222,8 @@ if final_signal_price is None:
         # CRITICAL: Clean the columns of this one-row DataFrame too!
         data_with_signal_price = clean_yfinance_columns(data_with_signal_price)
         
-        final_signal_price = data_with_signal_price['Close'].iloc[-1].item()
+        # The column is now guaranteed to be 'close'
+        final_signal_price = data_with_signal_price['close'].iloc[-1].item()
     except Exception as e:
         st.error(f"FATAL ERROR: Could not find a valid close price for {target_date.strftime('%Y-%m-%d')}.")
         st.stop()
