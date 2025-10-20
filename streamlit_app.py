@@ -1,6 +1,6 @@
 import pandas as pd
 import yfinance as yf
-import pandas_ta as pta # Using pandas-ta instead of TA-Lib for cloud portability
+import pandas_ta as pta 
 from datetime import datetime, timedelta
 import warnings
 import streamlit as st
@@ -20,12 +20,12 @@ SMA_PERIOD = 200
 if 'override_price' not in st.session_state:
     st.session_state['override_price'] = None
 
-# --- Helper Functions ---
+# --- Core Helper Function for Column Cleaning ---
 
 @st.cache_data(ttl=60*60*4) 
 def fetch_historical_data(target_date):
     """
-    Fetches historical data up to the trading day (inclusive).
+    Fetches historical data up to the trading day (inclusive) and cleans columns.
     Uses the robust yfinance method.
     """
     # yfinance 'end' date is exclusive, so we fetch up to the day *after* the target.
@@ -35,13 +35,13 @@ def fetch_historical_data(target_date):
     st.info(f"Fetching historical data for {TICKER} up to {target_date.strftime('%Y-%m-%d')}...")
     
     try:
+        # Use auto_adjust=True for simplicity, let the cleaning handle any format issues
         daily_data = yf.download(
             TICKER, 
             start=start_date_daily, 
             end=market_end_date, 
             interval="1d", 
             progress=False,
-            # auto_adjust is generally more stable for Streamlit/yfinance combination
             auto_adjust=True, 
             timeout=15 
         )
@@ -50,20 +50,36 @@ def fetch_historical_data(target_date):
             st.error("yfinance returned an empty dataset. Check ticker and date range.")
             return pd.DataFrame()
             
-        # Clean columns (auto_adjust often removes MultiIndex, but we clean to be safe)
-        daily_data.columns = [str(col).lower().replace('adj close', 'close') for col in daily_data.columns]
+        # --- ROBUST COLUMN CLEANING FIX ---
         
-        # Ensure 'Close', 'High', 'Low' columns are present after cleaning
-        required_cols = ['open', 'high', 'low', 'close']
-        if not all(col in daily_data.columns for col in required_cols):
-             st.error("Data cleaning failed: Missing OHLC columns.")
+        # 1. Handle MultiIndex (if it exists)
+        if isinstance(daily_data.columns, pd.MultiIndex):
+            # Drop the top level, typically the ticker name
+            daily_data.columns = daily_data.columns.droplevel(0)
+
+        # 2. Standardize and lowercase all column names for pandas-ta
+        new_cols = {}
+        for col in daily_data.columns:
+            clean_col = str(col).lower().replace('adj close', 'close')
+            new_cols[col] = clean_col
+
+        daily_data.rename(columns=new_cols, inplace=True)
+        # --- END ROBUST COLUMN CLEANING FIX ---
+        
+        # Ensure only the necessary columns remain and types are float
+        required_cols = ['open', 'high', 'low', 'close', 'volume']
+        
+        # Check for missing critical columns BEFORE removing NaNs
+        missing_cols = [c for c in ['high', 'low', 'close'] if c not in daily_data.columns]
+        if missing_cols:
+             st.error(f"Data cleaning failed: Missing OHLC columns {missing_cols}.")
              return pd.DataFrame()
 
-        # Remove rows that are beyond the target date (shouldn't happen with correct 'end' date, but safe)
+        # Remove rows that are beyond the target date
         daily_data = daily_data[daily_data.index.date <= target_date]
         
         # Drop all rows with NaNs (required before pandas-ta calculation)
-        data_for_indicators = daily_data.dropna()
+        data_for_indicators = daily_data[required_cols].dropna().astype(float)
         
         if data_for_indicators.shape[0] < SMA_PERIOD:
             st.error(f"FATAL ERROR: Insufficient clean data ({data_for_indicators.shape[0]} rows) to calculate {SMA_PERIOD}-Day SMA.")
@@ -75,6 +91,8 @@ def fetch_historical_data(target_date):
         st.error(f"FATAL ERROR during data download: {e}")
         return pd.DataFrame()
 
+
+# --- Calculation and Signal Functions (Using pandas-ta) ---
 
 def calculate_indicators(data_daily, current_price):
     """
@@ -90,7 +108,6 @@ def calculate_indicators(data_daily, current_price):
     latest_ema_5 = data_daily[f'EMA_{EMA_PERIOD}'].iloc[-1].item()
 
     # 3. 14-Day ATR
-    # pandas-ta automatically uses 'high', 'low', 'close' columns
     data_daily.ta.atr(length=ATR_PERIOD, append=True)
     latest_atr = data_daily[f'ATR_{ATR_PERIOD}'].iloc[-1].item()
 
@@ -128,7 +145,8 @@ def generate_signal(indicators):
             conviction_status = "DMA - Bear (CASH/SQQQ Default)"
             final_signal = "**BUY SQQQ**"
 
-    return final_signal, conviction_status, vasl_trigger_level
+    return final_signal, conviction_status, vasl_level
+
 
 # --- Streamlit Application Layout ---
 
@@ -229,7 +247,7 @@ def display_app():
 
     col1.metric("Signal Price (QQQ)", f"${indicators['current_price']:.2f}")
     col2.metric("200-Day SMA", f"${indicators['sma_200']:.2f}")
-    col3.metric("DMA Conviction", conviction_status.split('(')[0].strip()) # Clean up conviction status
+    col3.metric("DMA Conviction", conviction_status.split('(')[0].strip()) 
 
     st.subheader("Volatility Stop-Loss (VASL) Details")
     col_vasl_level, col_vasl_status = st.columns(2)
@@ -246,4 +264,5 @@ def display_app():
 
 if __name__ == "__main__":
     display_app()
+
 
