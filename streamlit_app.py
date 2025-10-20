@@ -1,6 +1,6 @@
 import pandas as pd
 import yfinance as yf
-# NOTE: Using pandas-ta for easy cloud deployment (pure Python, no C dependencies)
+# Using pandas-ta for easy cloud deployment (pure Python)
 import pandas_ta as pta 
 from datetime import datetime, timedelta
 import warnings
@@ -22,7 +22,6 @@ if 'use_realtime' not in st.session_state:
 
 # --- Helper Functions ---
 
-# Cache data for 4 hours to reduce API calls and speed up interaction
 @st.cache_data(ttl=60*60*4) 
 def get_realtime_price_live(ticker):
     """Fetches the current, non-historical price using yfinance Ticker info."""
@@ -40,9 +39,9 @@ def get_realtime_price_live(ticker):
 def fetch_historical_data(target_date):
     """
     Fetches historical data up to the trading day *prior* to the target date.
+    Includes fix for MultiIndex column error.
     """
     
-    # We need data up to the day *before* the signal price date.
     indicator_end_date = target_date 
     start_date_daily = indicator_end_date - timedelta(days=400) # Ensure enough data for 200 SMA
     
@@ -52,7 +51,12 @@ def fetch_historical_data(target_date):
                              interval="1d", 
                              progress=False)
     
-    # Drop NaNs
+    # --- FIX FOR MULTIINDEX ERROR ---
+    # Ensures the column names are a simple Index, preventing the .str accessor error.
+    if isinstance(daily_data.columns, pd.MultiIndex):
+        daily_data.columns = daily_data.columns.to_flat_index()
+    # --- END FIX ---
+    
     daily_data.dropna(inplace=True)
     
     if daily_data.empty or daily_data.shape[0] < SMA_PERIOD:
@@ -62,9 +66,6 @@ def fetch_historical_data(target_date):
 
 def calculate_indicators(data_daily, final_signal_price):
     """Calculates all indicators using pandas-ta."""
-    
-    # --- Integration with pandas-ta ---
-    # The .ta accessor and append=True automatically add columns to data_daily.
     
     # 1. 200-Day SMA (Column: 'SMA_200')
     data_daily.ta.sma(length=SMA_PERIOD, append=True)
@@ -78,10 +79,8 @@ def calculate_indicators(data_daily, final_signal_price):
     data_daily.ta.atr(length=ATR_PERIOD, append=True)
     latest_atr = data_daily[f'ATR_{ATR_PERIOD}'].iloc[-1].item()
 
-    # --- End Integration ---
-
     return {
-        'current_price': final_signal_price, # The price used for the signal
+        'current_price': final_signal_price,
         'sma_200': current_sma_200,
         'ema_5': latest_ema_5,
         'atr': latest_atr
@@ -141,7 +140,7 @@ st.session_state['use_realtime'] = realtime_toggle
 
 # Conditional Date Input
 if st.session_state['use_realtime']:
-    target_date = today # Indicators will use data up to yesterday's close
+    target_date = today
     signal_date_text = f"**Current Market** ({datetime.now().strftime('%Y-%m-%d %H:%M:%S %Z')})"
     st.sidebar.markdown(f"*(Indicators calculated using data up to: **{today - timedelta(days=1)}**)*")
     
@@ -152,7 +151,6 @@ if st.session_state['use_realtime']:
         st.stop()
         
 else:
-    # Historical Close Mode: Date Input
     target_date = st.sidebar.date_input(
         "Historical **Signal Date** (Close Price)",
         value=default_date,
@@ -174,7 +172,6 @@ else:
 st.header(f"Signal based on {TICKER} Price at: {signal_date_text}")
 st.info(f"Fetching historical data for indicators up to the day before {target_date.strftime('%Y-%m-%d')}...")
 
-# Fetch historical data (used for SMA, EMA, ATR calculation)
 daily_data = fetch_historical_data(target_date)
 
 if daily_data is None:
@@ -183,7 +180,6 @@ if daily_data is None:
     
 # 3. Determine Final Signal Price (if not already set by real-time fetch)
 if final_signal_price is None:
-    # Fetch the close price for the target date
     try:
         data_with_signal_price = yf.download(TICKER, 
                                              start=target_date, 
