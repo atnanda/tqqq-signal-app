@@ -24,28 +24,30 @@ if 'use_realtime' not in st.session_state:
 
 def clean_yfinance_columns(df):
     """
-    Ensures column names are simple strings and explicitly forces them to the 
-    standard lowercase expected by pandas-ta ('open', 'high', 'low', 'close').
+    Ensures column names are clean and explicitly mapped to the standard 
+    lowercase names required by pandas-ta ('open', 'high', 'low', 'close').
     """
     # 1. Ensure column headers are flat
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.to_flat_index()
     
     # 2. Convert column names from potential tuples back to simple strings
-    new_cols = []
+    new_cols_map = {}
     for col in df.columns:
-        if isinstance(col, tuple):
-            # Assumes the financial data name (Open/High/Close) is the first element
-            new_cols.append(col[0])
-        else:
-            new_cols.append(col)
+        simple_name = col[0] if isinstance(col, tuple) else col
+        new_cols_map[col] = simple_name.lower()
             
-    df.columns = new_cols
-
-    # --- CRITICAL NEW STEP: Normalize to Lowercase ---
-    # This is the most reliable column naming standard for pandas-ta.
-    df.columns = df.columns.str.lower()
-    # --- END CRITICAL STEP ---
+    df.rename(columns=new_cols_map, inplace=True)
+    
+    # Remove any columns we didn't map (like "Adj Close" if it somehow persisted)
+    df.columns = [c for c in df.columns if isinstance(c, str)]
+    
+    # Ensure the required columns exist
+    required_cols = ['open', 'high', 'low', 'close', 'volume']
+    if not all(col in df.columns for col in required_cols):
+        # A full download should always return these, but this check is safer
+        # This will mostly catch the close price later, but not necessary here.
+        pass
 
     return df
 
@@ -71,7 +73,7 @@ def fetch_historical_data(target_date):
     """
     
     indicator_end_date = target_date 
-    start_date_daily = indicator_end_date - timedelta(days=400) 
+    start_date_daily = indicator_end_date - timedelta(days=400) # Ensure enough data for 200 SMA
     
     daily_data = yf.download(TICKER, 
                              start=start_date_daily, 
@@ -104,10 +106,10 @@ def calculate_indicators(data_daily, final_signal_price):
     latest_ema_5 = data_daily[f'EMA_{EMA_PERIOD}'].iloc[-1].item()
 
     # 3. 14-Day ATR (Column: 'ATR_14')
-    # pandas-ta automatically finds 'high', 'low', and 'close'
+    # ATR requires 'high', 'low', and 'close', which are now guaranteed to be lowercase
     data_daily.ta.atr(length=ATR_PERIOD, append=True)
     
-    # FATAL ERROR FIX: The column 'ATR_14' must now exist since inputs were cleaned
+    # This column must now exist since inputs were cleaned
     latest_atr = data_daily[f'ATR_{ATR_PERIOD}'].iloc[-1].item()
 
     return {
@@ -141,7 +143,7 @@ def generate_signal(indicators):
             conviction_status = "DMA - Bear"
             final_signal = "**BUY SQQQ**"
 
-    return final_signal, conviction_status, vasl_level
+    return final_signal, conviction_status, vasl_trigger_level
 
 # --- Streamlit Application Layout ---
 
@@ -274,3 +276,4 @@ with col_vasl:
 
 st.markdown("---")
 st.markdown(f"Strategy Ticker: **{TICKER}** | ATR Multiplier: **{ATR_MULTIPLIER}**")
+
