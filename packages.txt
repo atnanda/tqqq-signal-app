@@ -1,1 +1,1 @@
-libta-lib-dev
+apt-get update && libta-lib-dev
