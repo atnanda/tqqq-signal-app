@@ -20,35 +20,38 @@ SMA_PERIOD = 200
 if 'use_realtime' not in st.session_state:
     st.session_state['use_realtime'] = False
 
-# --- Core Helper Function for Column Cleaning ---
+# --- Core Helper Function for Column Cleaning (The Definitive Fix) ---
 
 def clean_yfinance_columns(df):
     """
-    Ensures column names are clean and explicitly mapped to the standard 
-    lowercase names required by pandas-ta ('open', 'high', 'low', 'close').
+    Ensures column names are simple, clean, and explicitly set to the 
+    standard lowercase names required by pandas-ta ('open', 'high', 'low', 'close').
     """
-    # 1. Ensure column headers are flat
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.to_flat_index()
+    # Create a new list for clean column names
+    new_cols = []
     
-    # 2. Convert column names from potential tuples back to simple strings
-    new_cols_map = {}
     for col in df.columns:
-        simple_name = col[0] if isinstance(col, tuple) else col
-        new_cols_map[col] = simple_name.lower()
+        simple_name = None
+        
+        # 1. Handle MultiIndex/Tuple: Get the first element
+        if isinstance(col, tuple):
+            simple_name = col[0]
+        # 2. Handle Simple Index/String
+        elif isinstance(col, str):
+            simple_name = col
+        
+        # 3. Process the name: Lowercase it, or default to an empty string if processing fails
+        if simple_name:
+            new_cols.append(simple_name.lower())
+        else:
+            # Fallback for unexpected column types (should not happen with yfinance)
+            new_cols.append('')
             
-    df.rename(columns=new_cols_map, inplace=True)
+    df.columns = new_cols
     
-    # Remove any columns we didn't map (like "Adj Close" if it somehow persisted)
-    df.columns = [c for c in df.columns if isinstance(c, str)]
+    # Remove any columns that ended up with empty names
+    df = df.loc[:, df.columns != '']
     
-    # Ensure the required columns exist
-    required_cols = ['open', 'high', 'low', 'close', 'volume']
-    if not all(col in df.columns for col in required_cols):
-        # A full download should always return these, but this check is safer
-        # This will mostly catch the close price later, but not necessary here.
-        pass
-
     return df
 
 # --- Data Fetching Functions ---
@@ -73,7 +76,7 @@ def fetch_historical_data(target_date):
     """
     
     indicator_end_date = target_date 
-    start_date_daily = indicator_end_date - timedelta(days=400) # Ensure enough data for 200 SMA
+    start_date_daily = indicator_end_date - timedelta(days=400) 
     
     daily_data = yf.download(TICKER, 
                              start=start_date_daily, 
@@ -96,8 +99,9 @@ def fetch_historical_data(target_date):
 def calculate_indicators(data_daily, final_signal_price):
     """Calculates all indicators using pandas-ta."""
     
+    # All required columns ('close', 'high', 'low') are guaranteed to be clean and lowercase
+    
     # 1. 200-Day SMA (Column: 'SMA_200')
-    # Uses the 'close' column which is now guaranteed to be present and lowercase
     data_daily.ta.sma(length=SMA_PERIOD, append=True)
     current_sma_200 = data_daily[f'SMA_{SMA_PERIOD}'].iloc[-1].item()
     
@@ -106,10 +110,10 @@ def calculate_indicators(data_daily, final_signal_price):
     latest_ema_5 = data_daily[f'EMA_{EMA_PERIOD}'].iloc[-1].item()
 
     # 3. 14-Day ATR (Column: 'ATR_14')
-    # ATR requires 'high', 'low', and 'close', which are now guaranteed to be lowercase
+    # ATR requires 'high', 'low', and 'close', which are now guaranteed
     data_daily.ta.atr(length=ATR_PERIOD, append=True)
     
-    # This column must now exist since inputs were cleaned
+    # This column must now exist
     latest_atr = data_daily[f'ATR_{ATR_PERIOD}'].iloc[-1].item()
 
     return {
@@ -276,4 +280,5 @@ with col_vasl:
 
 st.markdown("---")
 st.markdown(f"Strategy Ticker: **{TICKER}** | ATR Multiplier: **{ATR_MULTIPLIER}**")
+
 
