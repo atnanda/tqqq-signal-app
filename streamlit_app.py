@@ -4,6 +4,8 @@ import pandas_ta as pta
 from datetime import datetime, timedelta
 import warnings
 import streamlit as st
+import requests # NEW: Required for the robust fallback
+import time
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -19,43 +21,62 @@ SMA_PERIOD = 200
 if 'use_realtime' not in st.session_state:
     st.session_state['use_realtime'] = False
 
+# --- Core Helper Function for Cookie/Crumb Retrieval (Bypassing common yfinance errors) ---
+
+@st.cache_data(ttl=60*60*2) # Cache for 2 hours
+def get_yfinance_cookie(ticker="SPY"):
+    """Fetches the necessary cookie and crumb for manual data download."""
+    try:
+        # A simple, robust call to get an access cookie (which contains the crumb)
+        url = f'https://finance.yahoo.com/quote/{ticker}'
+        response = requests.get(url, timeout=10)
+        
+        # Check if cookie exists
+        cookie = response.cookies
+        if not cookie:
+             return None, None
+             
+        # Find the crumb/csrf token in the response text using lxml
+        import lxml.html as html
+        tree = html.fromstring(response.text)
+        
+        crumb_element = tree.xpath("//script[contains(., 'CrumbStore')]/text()")
+        if not crumb_element:
+            return cookie, None
+        
+        # Extract crumb from the script element
+        crumb_line = [line for line in crumb_element[0].split('\n') if 'Crumb' in line]
+        if not crumb_line:
+             return cookie, None
+             
+        crumb = crumb_line[0].split(':')[1].strip().strip('"')
+        return cookie, crumb
+
+    except Exception as e:
+        st.error(f"Failed to fetch Yahoo Finance cookie/crumb: {e}")
+        return None, None
+
 # --- Core Helper Function for Column Cleaning ---
 
 def clean_yfinance_columns(df):
     """
     Ensures column names are clean and the DataFrame is ready for pandas-ta.
-    Assumes df is NOT empty.
-    
-    NOTE: With auto_adjust=True in yfinance.download(), yfinance handles some 
-    MultiIndex issues, but we keep this check for safety against non-standard output.
     """
-    # 1. Map existing column names to clean lowercase names (Handling MultiIndex if needed)
-    col_map = {}
-    for col in df.columns:
-        # Extract the base name, handling MultiIndex (tuples)
-        simple_name = col[0] if isinstance(col, tuple) else col
-        if simple_name:
-            col_map[col] = simple_name.lower()
-            
-    df.rename(columns=col_map, inplace=True)
+    # 1. Standardize column names (assuming yfinance/requests returned standard columns)
+    df.columns = [col.lower().replace('adj close', 'close') for col in df.columns]
     
     # 2. Select only the standardized columns and coerce types
-    required_cols = ['open', 'high', 'low', 'close', 'volume', 'adj close']
+    required_cols = ['open', 'high', 'low', 'close', 'volume']
     
     df_clean = pd.DataFrame(index=df.index)
     for col in required_cols:
         if col in df.columns:
             df_clean[col] = pd.to_numeric(df[col], errors='coerce')
     
-    # Prioritize 'close' or 'adj close' if available
-    if 'adj close' in df_clean.columns:
-        df_clean.rename(columns={'adj close': 'close'}, inplace=True)
-    
-    # CRITICAL FIX for the KeyError: Check if the required columns exist 
+    # CRITICAL CHECK for the KeyError
     missing_cols = [c for c in ['high', 'low', 'close'] if c not in df_clean.columns]
     if missing_cols:
-        # This message will be caught and displayed by the calling function
-        st.error(f"Data cleaning failed: Missing columns {missing_cols}.")
+        st.error(f"Data cleaning failed: Missing columns {missing_cols}. Returning empty DataFrame.")
         return pd.DataFrame()
         
     df_clean.dropna(subset=['high', 'low', 'close'], inplace=True)
@@ -65,29 +86,15 @@ def clean_yfinance_columns(df):
 # --- Data Fetching Functions ---
 
 @st.cache_data(ttl=60*60*4) 
-def get_realtime_price_live(ticker):
-    """Fetches the current, non-historical price using yfinance Ticker info."""
-    try:
-        ticker_obj = yf.Ticker(ticker)
-        # Try two different keys for robustness
-        price = ticker_obj.info.get('currentPrice') or ticker_obj.info.get('regularMarketPrice')
-        if price is None:
-             raise ValueError("Could not find a valid real-time price in yfinance info.")
-        return price
-    except Exception as e:
-        st.error(f"Error fetching real-time price for {ticker}: {e}")
-        return None
-
-@st.cache_data(ttl=60*60*4) 
 def fetch_historical_data(end_date):
     """
-    Fetches historical data up to the end_date (exclusive). 
-    Includes defensive API parameters.
+    Fetches historical data using a robust method (requests call with cookie/crumb) 
+    if yfinance.download fails.
     """
     
-    start_date = end_date - timedelta(days=400) # Ensure enough data for 200 SMA
+    start_date = end_date - timedelta(days=400) 
     
-    # --- YF DOWNLOAD ---
+    # First, try the highly defensive yfinance.download call
     try:
         daily_data = yf.download(
             TICKER, 
@@ -95,29 +102,42 @@ def fetch_historical_data(end_date):
             end=end_date, 
             interval="1d", 
             progress=False,
-            # CRITICAL DEFENSE: auto_adjust simplifies column names to 'Close'
-            auto_adjust=True, 
-            # Prevents indefinite hanging in case of a blocked connection
+            auto_adjust=True, # Use auto_adjust to simplify column output
             timeout=10 
         )
-    except Exception as e:
-        st.error(f"yfinance download failed (network/API): {e}")
-        return pd.DataFrame()
+        if not daily_data.empty and 'Close' in daily_data.columns:
+            st.info("Data successfully fetched using yfinance.download.")
+            return clean_yfinance_columns(daily_data)
+        
+    except Exception:
+        # Pass to the requests fallback if yfinance fails
+        st.warning("yfinance.download failed. Attempting manual requests fallback...")
 
-    # CRITICAL CHECK: If yfinance failed, it often returns an empty DataFrame.
-    if daily_data.empty:
-        st.error("yfinance returned an empty dataset. Check ticker and date range.")
+    # --- FALLBACK: Manual Requests Call ---
+    try:
+        start_ts = int(time.mktime(start_date.timetuple()))
+        end_ts = int(time.mktime(end_date.timetuple()))
+        
+        cookie, crumb = get_yfinance_cookie()
+        if not cookie or not crumb:
+            raise Exception("Could not retrieve necessary Yahoo Finance authentication.")
+            
+        api_url = (f"https://query1.finance.yahoo.com/v7/finance/download/{TICKER}"
+                   f"?period1={start_ts}&period2={end_ts}&interval=1d"
+                   f"&events=history&crumb={crumb}")
+
+        response = requests.get(api_url, cookies=cookie, timeout=10)
+        response.raise_for_status() # Raise exception for bad status codes (4xx or 5xx)
+
+        from io import StringIO
+        daily_data = pd.read_csv(StringIO(response.text), index_col='Date', parse_dates=True)
+        
+        st.info("Data successfully fetched using requests fallback.")
+        return clean_yfinance_columns(daily_data)
+        
+    except Exception as e:
+        st.error(f"FATAL: Both yfinance and requests fallback failed: {e}")
         return pd.DataFrame()
-        
-    # Apply the column cleaning logic
-    daily_data = clean_yfinance_columns(daily_data)
-    
-    # Final check after cleaning
-    if daily_data.empty or daily_data.shape[0] < SMA_PERIOD:
-        # This will trigger the FATAL ERROR display in the main app block
-        return pd.DataFrame() 
-        
-    return daily_data
 
 # --- Calculation and Signal Functions ---
 
@@ -133,7 +153,6 @@ def calculate_indicators(data_daily, final_signal_price):
     latest_ema_5 = data_daily[f'EMA_{EMA_PERIOD}'].iloc[-1].item()
 
     # 3. 14-Day ATR (Column: 'ATR_14')
-    # This must work now as 'high', 'low', 'close' are confirmed and clean
     data_daily.ta.atr(length=ATR_PERIOD, append=True)
     latest_atr = data_daily[f'ATR_{ATR_PERIOD}'].iloc[-1].item()
 
@@ -216,7 +235,7 @@ if st.session_state['use_realtime']:
     
     final_signal_price = get_realtime_price_live(TICKER)
     price_source_label = "Live Market Price"
-    indicator_end_date = today + timedelta(days=1) # Fetch data up to, but not including, tomorrow (i.e., include today's close if available)
+    indicator_end_date = today + timedelta(days=1) 
     if final_signal_price is None:
         st.warning("Could not fetch live price. Using yesterday's close for the signal price.")
         
@@ -231,7 +250,7 @@ else:
         st.error(f"**{target_date.strftime('%Y-%m-%d')} is a weekend.** Please select a trading day.")
         st.stop()
         
-    indicator_end_date = target_date + timedelta(days=1) # Fetch up to END date (exclusive) to include signal day's close
+    indicator_end_date = target_date + timedelta(days=1) 
     signal_date_text = f"Close of **{target_date.strftime('%Y-%m-%d')}**"
     price_source_label = f"Historical Close ({target_date.strftime('%Y-%m-%d')})"
     final_signal_price = None
@@ -240,7 +259,7 @@ st.sidebar.markdown(f"*(Indicators calculated using data up to: **{indicator_end
 
 # 2. Execute Strategy
 st.header(f"Signal based on {TICKER} Price at: {signal_date_text}")
-st.info(f"Fetching historical data for indicators up to {indicator_end_date - timedelta(days=1)}...")
+st.info(f"Attempting to fetch historical data for indicators up to {indicator_end_date - timedelta(days=1)}...")
 
 # Fetch data for indicators (includes the signal date's close)
 daily_data = fetch_historical_data(indicator_end_date) 
@@ -248,6 +267,7 @@ daily_data = fetch_historical_data(indicator_end_date)
 # --- CRITICAL CHECKS ---
 if daily_data.empty:
     st.error("FATAL ERROR: Insufficient data or data download failed. Cannot proceed with calculations.")
+    # Show how the fetch failed (this is already handled inside the fetch_historical_data function)
     st.stop()
     
 # 3. Determine Final Signal Price (if not already set by real-time fetch)
@@ -305,5 +325,4 @@ with col_vasl:
 
 st.markdown("---")
 st.markdown(f"Strategy Ticker: **{TICKER}** | ATR Multiplier: **{ATR_MULTIPLIER}**")
-
 
