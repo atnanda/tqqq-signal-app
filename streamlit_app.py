@@ -19,14 +19,17 @@ SMA_PERIOD = 200
 if 'use_realtime' not in st.session_state:
     st.session_state['use_realtime'] = False
 
-# --- Core Helper Function for Column Cleaning (The Final Layer of Defense) ---
+# --- Core Helper Function for Column Cleaning ---
 
 def clean_yfinance_columns(df):
     """
     Ensures column names are clean and the DataFrame is ready for pandas-ta.
     Assumes df is NOT empty.
+    
+    NOTE: With auto_adjust=True in yfinance.download(), yfinance handles some 
+    MultiIndex issues, but we keep this check for safety against non-standard output.
     """
-    # 1. Map existing column names to clean lowercase names
+    # 1. Map existing column names to clean lowercase names (Handling MultiIndex if needed)
     col_map = {}
     for col in df.columns:
         # Extract the base name, handling MultiIndex (tuples)
@@ -37,20 +40,22 @@ def clean_yfinance_columns(df):
     df.rename(columns=col_map, inplace=True)
     
     # 2. Select only the standardized columns and coerce types
-    required_cols = ['open', 'high', 'low', 'close', 'volume']
+    required_cols = ['open', 'high', 'low', 'close', 'volume', 'adj close']
     
     df_clean = pd.DataFrame(index=df.index)
     for col in required_cols:
         if col in df.columns:
-            # Explicitly coerce to float, which is safer for calculations
             df_clean[col] = pd.to_numeric(df[col], errors='coerce')
     
-    # CRITICAL FIX for the KeyError: 
-    # Check if the required columns exist *before* trying to dropna on them
-    # This prevents the KeyError if yfinance returned an empty or corrupt df where cleaning failed.
+    # Prioritize 'close' or 'adj close' if available
+    if 'adj close' in df_clean.columns:
+        df_clean.rename(columns={'adj close': 'close'}, inplace=True)
+    
+    # CRITICAL FIX for the KeyError: Check if the required columns exist 
     missing_cols = [c for c in ['high', 'low', 'close'] if c not in df_clean.columns]
     if missing_cols:
-        st.warning(f"Data cleaning failed: Missing columns {missing_cols}. Returning empty DataFrame.")
+        # This message will be caught and displayed by the calling function
+        st.error(f"Data cleaning failed: Missing columns {missing_cols}.")
         return pd.DataFrame()
         
     df_clean.dropna(subset=['high', 'low', 'close'], inplace=True)
@@ -62,9 +67,9 @@ def clean_yfinance_columns(df):
 @st.cache_data(ttl=60*60*4) 
 def get_realtime_price_live(ticker):
     """Fetches the current, non-historical price using yfinance Ticker info."""
-    # ... (Function remains unchanged) ...
     try:
         ticker_obj = yf.Ticker(ticker)
+        # Try two different keys for robustness
         price = ticker_obj.info.get('currentPrice') or ticker_obj.info.get('regularMarketPrice')
         if price is None:
              raise ValueError("Could not find a valid real-time price in yfinance info.")
@@ -76,22 +81,27 @@ def get_realtime_price_live(ticker):
 @st.cache_data(ttl=60*60*4) 
 def fetch_historical_data(end_date):
     """
-    Fetches historical data up to the trading day *prior* to the end_date (exclusive).
+    Fetches historical data up to the end_date (exclusive). 
+    Includes defensive API parameters.
     """
     
-    # Fetch 400 days back to ensure enough data for 200 SMA
-    start_date = end_date - timedelta(days=400) 
+    start_date = end_date - timedelta(days=400) # Ensure enough data for 200 SMA
     
     # --- YF DOWNLOAD ---
     try:
-        daily_data = yf.download(TICKER, 
-                                 start=start_date, 
-                                 end=end_date, 
-                                 interval="1d", 
-                                 progress=False,
-                                 auto_adjust=False)
+        daily_data = yf.download(
+            TICKER, 
+            start=start_date, 
+            end=end_date, 
+            interval="1d", 
+            progress=False,
+            # CRITICAL DEFENSE: auto_adjust simplifies column names to 'Close'
+            auto_adjust=True, 
+            # Prevents indefinite hanging in case of a blocked connection
+            timeout=10 
+        )
     except Exception as e:
-        st.error(f"yfinance download failed: {e}")
+        st.error(f"yfinance download failed (network/API): {e}")
         return pd.DataFrame()
 
     # CRITICAL CHECK: If yfinance failed, it often returns an empty DataFrame.
@@ -104,6 +114,7 @@ def fetch_historical_data(end_date):
     
     # Final check after cleaning
     if daily_data.empty or daily_data.shape[0] < SMA_PERIOD:
+        # This will trigger the FATAL ERROR display in the main app block
         return pd.DataFrame() 
         
     return daily_data
@@ -122,6 +133,7 @@ def calculate_indicators(data_daily, final_signal_price):
     latest_ema_5 = data_daily[f'EMA_{EMA_PERIOD}'].iloc[-1].item()
 
     # 3. 14-Day ATR (Column: 'ATR_14')
+    # This must work now as 'high', 'low', 'close' are confirmed and clean
     data_daily.ta.atr(length=ATR_PERIOD, append=True)
     latest_atr = data_daily[f'ATR_{ATR_PERIOD}'].iloc[-1].item()
 
@@ -133,7 +145,6 @@ def calculate_indicators(data_daily, final_signal_price):
     }
 
 def generate_signal(indicators):
-    # ... (Function remains unchanged) ...
     """Applies the trading strategy logic (VASL & DMA)."""
     price = indicators['current_price']
     sma_200 = indicators['sma_200']
@@ -176,6 +187,7 @@ today = datetime.today().date()
 # --- WEEKEND FIX LOGIC ---
 default_date_raw = today - timedelta(days=1)
 
+# Adjust default date to the most recent Friday if needed
 if default_date_raw.weekday() == 5: # Saturday
     default_date = today - timedelta(days=2) 
 elif default_date_raw.weekday() == 6: # Sunday
@@ -204,9 +216,9 @@ if st.session_state['use_realtime']:
     
     final_signal_price = get_realtime_price_live(TICKER)
     price_source_label = "Live Market Price"
-    indicator_end_date = today + timedelta(days=1) # Fetch up to today's close
+    indicator_end_date = today + timedelta(days=1) # Fetch data up to, but not including, tomorrow (i.e., include today's close if available)
     if final_signal_price is None:
-        st.warning("Could not fetch live price. Using yesterday's close for indicators.")
+        st.warning("Could not fetch live price. Using yesterday's close for the signal price.")
         
 else:
     target_date = st.sidebar.date_input(
@@ -219,7 +231,7 @@ else:
         st.error(f"**{target_date.strftime('%Y-%m-%d')} is a weekend.** Please select a trading day.")
         st.stop()
         
-    indicator_end_date = target_date + timedelta(days=1) # Fetch up to END date (exclusive)
+    indicator_end_date = target_date + timedelta(days=1) # Fetch up to END date (exclusive) to include signal day's close
     signal_date_text = f"Close of **{target_date.strftime('%Y-%m-%d')}**"
     price_source_label = f"Historical Close ({target_date.strftime('%Y-%m-%d')})"
     final_signal_price = None
@@ -293,4 +305,5 @@ with col_vasl:
 
 st.markdown("---")
 st.markdown(f"Strategy Ticker: **{TICKER}** | ATR Multiplier: **{ATR_MULTIPLIER}**")
+
 
