@@ -20,7 +20,30 @@ SMA_PERIOD = 200
 if 'use_realtime' not in st.session_state:
     st.session_state['use_realtime'] = False
 
-# --- Helper Functions ---
+# --- Core Helper Function for Column Cleaning ---
+
+def clean_yfinance_columns(df):
+    """
+    Ensures column names are simple strings (e.g., 'Close' instead of ('Close', 'QQQ'))
+    to prevent MultiIndex and Tuple access errors in pandas-ta.
+    """
+    # 1. Ensure column headers are flat
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.to_flat_index()
+    
+    # 2. Convert column names from potential tuples back to simple strings
+    new_cols = []
+    for col in df.columns:
+        if isinstance(col, tuple):
+            # Assumes the financial data name (Open/High/Close) is the first element
+            new_cols.append(col[0])
+        else:
+            new_cols.append(col)
+            
+    df.columns = new_cols
+    return df
+
+# --- Data Fetching Functions ---
 
 @st.cache_data(ttl=60*60*4) 
 def get_realtime_price_live(ticker):
@@ -39,11 +62,10 @@ def get_realtime_price_live(ticker):
 def fetch_historical_data(target_date):
     """
     Fetches historical data up to the trading day *prior* to the target date.
-    Includes fix for MultiIndex column error.
     """
     
     indicator_end_date = target_date 
-    start_date_daily = indicator_end_date - timedelta(days=400) # Ensure enough data for 200 SMA
+    start_date_daily = indicator_end_date - timedelta(days=400) 
     
     daily_data = yf.download(TICKER, 
                              start=start_date_daily, 
@@ -51,11 +73,8 @@ def fetch_historical_data(target_date):
                              interval="1d", 
                              progress=False)
     
-    # --- FIX FOR MULTIINDEX ERROR ---
-    # Ensures the column names are a simple Index, preventing the .str accessor error.
-    if isinstance(daily_data.columns, pd.MultiIndex):
-        daily_data.columns = daily_data.columns.to_flat_index()
-    # --- END FIX ---
+    # Apply the column cleaning logic
+    daily_data = clean_yfinance_columns(daily_data)
     
     daily_data.dropna(inplace=True)
     
@@ -63,6 +82,8 @@ def fetch_historical_data(target_date):
         return None
         
     return daily_data
+
+# --- Calculation and Signal Functions ---
 
 def calculate_indicators(data_daily, final_signal_price):
     """Calculates all indicators using pandas-ta."""
@@ -110,7 +131,7 @@ def generate_signal(indicators):
             conviction_status = "DMA - Bear"
             final_signal = "**BUY SQQQ**"
 
-    return final_signal, conviction_status, vasl_trigger_level
+    return final_signal, conviction_status, vasl_level
 
 # --- Streamlit Application Layout ---
 
@@ -181,11 +202,16 @@ if daily_data is None:
 # 3. Determine Final Signal Price (if not already set by real-time fetch)
 if final_signal_price is None:
     try:
+        # Fetch data for the signal date's closing price
         data_with_signal_price = yf.download(TICKER, 
                                              start=target_date, 
                                              end=target_date + timedelta(days=1), 
                                              interval="1d", 
                                              progress=False)
+        
+        # CRITICAL: Clean the columns of this one-row DataFrame too!
+        data_with_signal_price = clean_yfinance_columns(data_with_signal_price)
+        
         final_signal_price = data_with_signal_price['Close'].iloc[-1].item()
     except Exception as e:
         st.error(f"FATAL ERROR: Could not find a valid close price for {target_date.strftime('%Y-%m-%d')}.")
