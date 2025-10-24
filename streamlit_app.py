@@ -23,7 +23,7 @@ INVERSE_TICKER = "SQQQ"
 if 'override_price' not in st.session_state:
     st.session_state['override_price'] = None
 
-# --- Core Helper Function for Data Fetching and Cleaning (FINAL FIX) ---
+# --- Core Helper Function for Data Fetching and Cleaning ---
 
 @st.cache_data(ttl=60*60*4) 
 def fetch_historical_data(target_date, lookback_days=400):
@@ -66,7 +66,6 @@ def fetch_historical_data(target_date, lookback_days=400):
         df_combined = df_combined.dropna()
 
         # --- 2. Create Simple QQQ Columns (Needed for Indicator Calculation) ---
-        # The backtesting engine requires: 'high', 'low', 'close' for QQQ to run indicators.
         # We rename the QQQ prefixed columns to simple names on the combined DataFrame.
         qqq_cols_map = {}
         for col in ['open', 'high', 'low', 'close', 'volume']:
@@ -100,7 +99,6 @@ def fetch_historical_data(target_date, lookback_days=400):
 def calculate_true_range_and_atr(df, atr_period):
     """Calculates True Range and Average True Range using native Pandas/Numpy."""
     
-    # Calculate the three components of True Range (TR)
     high_minus_low = df['high'] - df['low']
     high_minus_prev_close = np.abs(df['high'] - df['close'].shift(1))
     low_minus_prev_close = np.abs(df['low'] - df['close'].shift(1))
@@ -109,10 +107,8 @@ def calculate_true_range_and_atr(df, atr_period):
                                'hpc': high_minus_prev_close, 
                                'lpc': low_minus_prev_close}).max(axis=1)
     
-    # Average True Range (ATR) is the Exponential Moving Average of the True Range
     atr_series = true_range.ewm(span=atr_period, adjust=False, min_periods=atr_period).mean()
     
-    # Use ffill to get the last valid value, avoiding NaN errors
     latest_atr = atr_series.ffill().iloc[-1]
 
     if pd.isna(latest_atr) or not np.isfinite(latest_atr):
@@ -127,16 +123,15 @@ def calculate_indicators(data_daily, current_price):
     
     df = data_daily.copy() 
     
-    # 1. 200-Day SMA (using pandas-ta)
-    # Uses the 'close' column which is QQQ Adjusted Close
+    # 1. 200-Day SMA
     df.ta.sma(length=SMA_PERIOD, append=True)
     current_sma_200 = df[f'SMA_{SMA_PERIOD}'].iloc[-1]
     
-    # 2. 5-Day EMA (using pandas-ta)
+    # 2. 5-Day EMA
     df.ta.ema(length=EMA_PERIOD, append=True)
     latest_ema_5 = df[f'EMA_{EMA_PERIOD}'].iloc[-1]
 
-    # 3. 14-Day ATR (using manual calculation)
+    # 3. 14-Day ATR
     latest_atr = calculate_true_range_and_atr(df, ATR_PERIOD)
     
     # Final check and conversion
@@ -195,8 +190,6 @@ class BacktestEngine:
     def generate_historical_signals(self):
         """Generates the trading signal and conviction status for every day in the history."""
         
-        # Use simple QQQ columns ('high', 'low', 'close') for indicators
-        
         # 1. Calculate SMA and EMA (once)
         self.df.ta.sma(length=SMA_PERIOD, append=True)
         self.df.ta.ema(length=EMA_PERIOD, append=True)
@@ -238,7 +231,7 @@ class BacktestEngine:
     def run_simulation(self, start_date):
         """Runs the $10k simulation from the start date to the end of the data."""
         
-        sim_df = self.df[self.df.index >= start_date].copy()
+        sim_df = self.df[self.df.index.date >= start_date].copy()
         
         if sim_df.empty:
             return INITIAL_INVESTMENT, 0
@@ -277,7 +270,6 @@ class BacktestEngine:
             sim_df.loc[current_day.name, 'Portfolio_Value'] = portfolio_value
 
         # Calculate final buy-and-hold value for comparison
-        # CRITICAL: These column names are now available due to the fix in fetch_historical_data
         qqq_close_col = f'{TICKER}_close'
         qqq_start_price = sim_df.iloc[0][qqq_close_col]
         qqq_end_price = sim_df.iloc[-1][qqq_close_col]
@@ -290,20 +282,20 @@ def run_backtests(full_data, target_date):
     """Defines timeframes and runs the backtesting engine."""
     
     backtester = BacktestEngine(full_data)
-    # Generate historical signals for the entire period once
     signals_df = backtester.generate_historical_signals()
     
     if signals_df.empty:
         st.error("Backtest failed: Could not generate historical signals.")
         return []
 
-    today = target_date
+    # 'today' is a datetime.date object from the st.date_input
+    today = target_date 
     
-    # Calculate start dates
+    # Calculate start dates (FIXED: removed redundant .date() calls after timedelta)
     start_of_year = datetime(today.year, 1, 1).date()
-    three_months_back = (today - timedelta(days=90)).date()
-    one_week_back = (today - timedelta(days=7)).date()
-    one_day_back = (today - timedelta(days=1)).date()
+    three_months_back = (today - timedelta(days=90))
+    one_week_back = (today - timedelta(days=7))
+    one_day_back = (today - timedelta(days=1))
 
     timeframes = [
         ("Year-to-Date (YTD)", start_of_year),
@@ -316,15 +308,13 @@ def run_backtests(full_data, target_date):
     
     for label, start_date in timeframes:
         if start_date >= today:
-             # Skip or use initial investment if start date is today or later
              results.append({"Timeframe": label, "Start Date": start_date, "Strategy Value": INITIAL_INVESTMENT, "B&H QQQ Value": INITIAL_INVESTMENT, "P/L": 0.0, "B&H P/L": 0.0})
              continue
              
         # Find the actual first trading day for the start date
-        # Use signals_df index because it's already cleaned and has indicators calculated
         relevant_dates = signals_df.index[signals_df.index.date >= start_date]
-        first_trade_day = relevant_dates.min() if not relevant_dates.empty else None
-        
+        first_trade_day = relevant_dates.min().date() if not relevant_dates.empty else None # Get the date part for comparison
+
         if first_trade_day is None:
             st.warning(f"Skipping {label}: No trading data available on or after {start_date.strftime('%Y-%m-%d')}.")
             continue
@@ -407,7 +397,6 @@ def display_app():
     price_source_label = "Forced Override"
     
     if final_signal_price is None:
-        # We use the simple 'close' column here, which is QQQ adjusted close
         if not data_for_indicators.empty and data_for_indicators.index[-1].date() == target_date:
             final_signal_price = data_for_indicators['close'].iloc[-1].item()
             price_source_label = f"Close (Adjusted) of {target_date.strftime('%Y-%m-%d')}"
@@ -479,7 +468,6 @@ def display_app():
             "B&H P/L": "B&H P/L",
         })
         
-        # Apply conditional coloring to P/L columns
         st.dataframe(df_results, 
             column_config={
                 "Start Date": st.column_config.DatetimeColumn("Start Date", format="YYYY-MM-DD"),
