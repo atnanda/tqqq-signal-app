@@ -23,12 +23,13 @@ INVERSE_TICKER = "SQQQ"
 if 'override_price' not in st.session_state:
     st.session_state['override_price'] = None
 
-# --- Core Helper Function for Data Fetching and Cleaning ---
+# --- Core Helper Function for Data Fetching and Cleaning (FINAL FIX) ---
 
 @st.cache_data(ttl=60*60*4) 
 def fetch_historical_data(target_date, lookback_days=400):
     """
     Fetches historical data for QQQ, TQQQ, and SQQQ, cleans it, and returns a single DataFrame.
+    This version ensures all necessary column formats (simple for indicators, prefixed for backtest) exist.
     """
     market_end_date = target_date + timedelta(days=1)
     start_date = target_date - timedelta(days=lookback_days)
@@ -53,35 +54,34 @@ def fetch_historical_data(target_date, lookback_days=400):
             st.error("yfinance returned an empty dataset. Check tickers and date range.")
             return pd.DataFrame()
 
-        # --- Data Cleaning and Structuring ---
+        # --- 1. Flatten MultiIndex and Create Prefixed Columns (Needed for Backtesting) ---
         clean_data = {}
-        for metric in ['Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume']:
+        for metric in ['Open', 'High', 'Low', 'Adj Close', 'Volume']:
             for ticker in tickers:
-                # Handle MultiIndex and use Adj Close as the primary price
-                col_name = f"{ticker}_{metric.lower().replace('adj close', 'close')}"
-                if metric in all_data.columns and ticker in all_data[metric].columns:
-                    clean_data[col_name] = all_data[metric][ticker].copy()
-                elif metric in all_data.columns and isinstance(all_data.columns, pd.MultiIndex):
-                    # Fallback for single-ticker download
-                    pass # This case is complex, rely on the core logic below
+                if (metric, ticker) in all_data.columns:
+                    col_name = f"{ticker}_{metric.lower().replace('adj close', 'close')}"
+                    clean_data[col_name] = all_data[(metric, ticker)].copy()
 
         df_combined = pd.DataFrame(clean_data)
         df_combined = df_combined.dropna()
 
-        # Rename core QQQ columns for indicator calculation
-        qqq_cols = {}
+        # --- 2. Create Simple QQQ Columns (Needed for Indicator Calculation) ---
+        # The backtesting engine requires: 'high', 'low', 'close' for QQQ to run indicators.
+        # We rename the QQQ prefixed columns to simple names on the combined DataFrame.
+        qqq_cols_map = {}
         for col in ['open', 'high', 'low', 'close', 'volume']:
-            # The 'Adj Close' for QQQ has already been renamed to 'close' in the dictionary creation
-            qqq_cols[f'{TICKER}_{col}'] = col
+            prefixed_col = f'{TICKER}_{col}'
+            if prefixed_col in df_combined.columns:
+                qqq_cols_map[prefixed_col] = col
 
-        df_combined.rename(columns=qqq_cols, inplace=True)
+        df_combined.rename(columns=qqq_cols_map, inplace=True)
         
-        # Check for QQQ required columns
+        # --- 3. Final Validation ---
         required_qqq_cols = ['high', 'low', 'close', 'open', 'volume']
         missing_qqq_cols = [c for c in required_qqq_cols if c not in df_combined.columns]
         
         if missing_qqq_cols:
-             st.error(f"Data cleaning failed: Missing QQQ OHLC columns {missing_qqq_cols} after cleaning.")
+             st.error(f"Data cleaning failed: Missing QQQ OHLC columns {missing_qqq_cols} after renaming.")
              return pd.DataFrame()
 
         # Check for sufficient data
@@ -120,7 +120,6 @@ def calculate_true_range_and_atr(df, atr_period):
          
     return latest_atr
 
-
 # --- Calculation and Signal Functions ---
 
 def calculate_indicators(data_daily, current_price):
@@ -128,15 +127,16 @@ def calculate_indicators(data_daily, current_price):
     
     df = data_daily.copy() 
     
-    # 1. 200-Day SMA
+    # 1. 200-Day SMA (using pandas-ta)
+    # Uses the 'close' column which is QQQ Adjusted Close
     df.ta.sma(length=SMA_PERIOD, append=True)
     current_sma_200 = df[f'SMA_{SMA_PERIOD}'].iloc[-1]
     
-    # 2. 5-Day EMA
+    # 2. 5-Day EMA (using pandas-ta)
     df.ta.ema(length=EMA_PERIOD, append=True)
     latest_ema_5 = df[f'EMA_{EMA_PERIOD}'].iloc[-1]
 
-    # 3. 14-Day ATR
+    # 3. 14-Day ATR (using manual calculation)
     latest_atr = calculate_true_range_and_atr(df, ATR_PERIOD)
     
     # Final check and conversion
@@ -195,11 +195,13 @@ class BacktestEngine:
     def generate_historical_signals(self):
         """Generates the trading signal and conviction status for every day in the history."""
         
+        # Use simple QQQ columns ('high', 'low', 'close') for indicators
+        
         # 1. Calculate SMA and EMA (once)
         self.df.ta.sma(length=SMA_PERIOD, append=True)
         self.df.ta.ema(length=EMA_PERIOD, append=True)
         
-        # 2. Manually calculate ATR (bypassing pandas-ta for robustness)
+        # 2. Manually calculate ATR 
         high_minus_low = self.df['high'] - self.df['low']
         high_minus_prev_close = np.abs(self.df['high'] - self.df['close'].shift(1))
         low_minus_prev_close = np.abs(self.df['low'] - self.df['close'].shift(1))
@@ -218,7 +220,7 @@ class BacktestEngine:
             ema_5 = row[f'EMA_{EMA_PERIOD}']
             sma_200 = row[f'SMA_{SMA_PERIOD}']
             atr = row['ATR']
-            price = row['close']
+            price = row['close'] # This is QQQ's adjusted close
             
             vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)
             
@@ -275,8 +277,10 @@ class BacktestEngine:
             sim_df.loc[current_day.name, 'Portfolio_Value'] = portfolio_value
 
         # Calculate final buy-and-hold value for comparison
-        qqq_start_price = sim_df.iloc[0][f'{TICKER}_close']
-        qqq_end_price = sim_df.iloc[-1][f'{TICKER}_close']
+        # CRITICAL: These column names are now available due to the fix in fetch_historical_data
+        qqq_close_col = f'{TICKER}_close'
+        qqq_start_price = sim_df.iloc[0][qqq_close_col]
+        qqq_end_price = sim_df.iloc[-1][qqq_close_col]
         buy_and_hold_qqq = initial_investment * (qqq_end_price / qqq_start_price)
 
         return portfolio_value, buy_and_hold_qqq
@@ -297,9 +301,9 @@ def run_backtests(full_data, target_date):
     
     # Calculate start dates
     start_of_year = datetime(today.year, 1, 1).date()
-    three_months_back = (today - timedelta(days=90))
-    one_week_back = (today - timedelta(days=7))
-    one_day_back = (today - timedelta(days=1))
+    three_months_back = (today - timedelta(days=90)).date()
+    one_week_back = (today - timedelta(days=7)).date()
+    one_day_back = (today - timedelta(days=1)).date()
 
     timeframes = [
         ("Year-to-Date (YTD)", start_of_year),
@@ -312,13 +316,16 @@ def run_backtests(full_data, target_date):
     
     for label, start_date in timeframes:
         if start_date >= today:
+             # Skip or use initial investment if start date is today or later
              results.append({"Timeframe": label, "Start Date": start_date, "Strategy Value": INITIAL_INVESTMENT, "B&H QQQ Value": INITIAL_INVESTMENT, "P/L": 0.0, "B&H P/L": 0.0})
              continue
              
         # Find the actual first trading day for the start date
-        first_trade_day = signals_df.index[signals_df.index.date >= start_date].min()
+        # Use signals_df index because it's already cleaned and has indicators calculated
+        relevant_dates = signals_df.index[signals_df.index.date >= start_date]
+        first_trade_day = relevant_dates.min() if not relevant_dates.empty else None
         
-        if pd.isna(first_trade_day):
+        if first_trade_day is None:
             st.warning(f"Skipping {label}: No trading data available on or after {start_date.strftime('%Y-%m-%d')}.")
             continue
             
@@ -400,6 +407,7 @@ def display_app():
     price_source_label = "Forced Override"
     
     if final_signal_price is None:
+        # We use the simple 'close' column here, which is QQQ adjusted close
         if not data_for_indicators.empty and data_for_indicators.index[-1].date() == target_date:
             final_signal_price = data_for_indicators['close'].iloc[-1].item()
             price_source_label = f"Close (Adjusted) of {target_date.strftime('%Y-%m-%d')}"
