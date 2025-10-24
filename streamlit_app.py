@@ -20,7 +20,7 @@ SMA_PERIOD = 200
 if 'override_price' not in st.session_state:
     st.session_state['override_price'] = None
 
-# --- Core Helper Function for Data Fetching and Cleaning (THE FIX IS HERE) ---
+# --- Core Helper Function for Data Fetching and Cleaning (Fixes all yfinance column issues) ---
 
 @st.cache_data(ttl=60*60*4) 
 def fetch_historical_data(target_date):
@@ -53,22 +53,21 @@ def fetch_historical_data(target_date):
         
         # 1. Handle MultiIndex (if it exists) by dropping the top level
         if isinstance(daily_data.columns, pd.MultiIndex):
-            # This collapses the column structure (e.g., ('Close', 'QQQ') -> 'Close')
             daily_data.columns = daily_data.columns.droplevel(0)
 
         # 2. Rename columns using the **EXACT ORDER** yfinance returns them
-        # Default yfinance order: Open, High, Low, Close, Adj Close, Volume
+        # Default yfinance order (6 columns): Open, High, Low, Close, Adj Close, Volume
         if daily_data.shape[1] >= 6:
             daily_data.columns = [
                 'open',
                 'high',
                 'low',
-                'non_adj_close', # Placeholder for Close
+                'non_adj_close', # Placeholder for non-adjusted Close
                 'close',         # This MUST be the Adjusted Close for calculations
                 'volume'
             ]
         elif daily_data.shape[1] == 5:
-            # If auto_adjust=True was somehow used or it only returned 5 columns
+            # Fallback for 5 columns (likely only if auto_adjust=True was somehow used)
             daily_data.columns = ['open', 'high', 'low', 'close', 'volume']
             
         # --- END ROBUST COLUMN FIX ---
@@ -78,15 +77,15 @@ def fetch_historical_data(target_date):
         missing_cols = [c for c in ['high', 'low', 'close'] if c not in daily_data.columns]
         
         if missing_cols:
-             # This error should now be virtually impossible if yfinance returned 6 columns
-             st.error(f"Data cleaning failed (Final Check): Missing OHLC columns {missing_cols}. DataFrame shape: {daily_data.shape}")
+             st.error(f"Data cleaning failed: Missing OHLC columns {missing_cols}. DataFrame shape: {daily_data.shape}")
              return pd.DataFrame()
 
         # 4. Final data preparation
         daily_data = daily_data[daily_data.index.date <= target_date]
+        # Only select required columns and ensure they are float after dropping NaNs
         data_for_indicators = daily_data[required_cols].dropna().astype(float)
         
-        # Check for sufficient data
+        # Check for sufficient data (need enough rows for ATR's initial calculations)
         if data_for_indicators.shape[0] < SMA_PERIOD:
             st.error(f"FATAL ERROR: Insufficient clean data ({data_for_indicators.shape[0]} rows) to calculate {SMA_PERIOD}-Day SMA.")
             return pd.DataFrame() 
@@ -98,19 +97,30 @@ def fetch_historical_data(target_date):
         return pd.DataFrame()
 
 
-# --- Calculation and Signal Functions (No Change) ---
+# --- Calculation and Signal Functions (Fixes ATR access error) ---
 
 def calculate_indicators(data_daily, current_price):
     """Calculates all indicators using pandas-ta."""
     
+    # 1. 200-Day SMA
     data_daily.ta.sma(length=SMA_PERIOD, append=True)
     current_sma_200 = data_daily[f'SMA_{SMA_PERIOD}'].iloc[-1].item()
     
+    # 2. 5-Day EMA
     data_daily.ta.ema(length=EMA_PERIOD, append=True)
     latest_ema_5 = data_daily[f'EMA_{EMA_PERIOD}'].iloc[-1].item()
 
+    # 3. 14-Day ATR
+    atr_col_name = f'ATR_{ATR_PERIOD}'
+    # The calculation needs high, low, close columns to be present and clean
     data_daily.ta.atr(length=ATR_PERIOD, append=True)
-    latest_atr = data_daily[f'ATR_{ATR_PERIOD}'].iloc[-1].item()
+    
+    # CRITICAL: Check for the ATR column explicitly after calculation
+    if atr_col_name not in data_daily.columns:
+        # This confirms pandas-ta failed to produce the column
+        raise KeyError(f"Failed to calculate or access indicator: '{atr_col_name}'. Check data integrity for ATR.")
+
+    latest_atr = data_daily[atr_col_name].iloc[-1].item()
 
     return {
         'current_price': current_price,
@@ -127,12 +137,14 @@ def generate_signal(indicators):
     ema_5 = indicators['ema_5']
     atr = indicators['atr']
 
+    # --- 1. Volatility Stop-Loss (VASL) ---
     vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)
     
     if price < vasl_trigger_level:
         final_signal = "**SELL TQQQ / CASH (Exit)**"
         conviction_status = "VASL Triggered"
     else:
+        # --- 2. Conviction Filter (DMA) ---
         dma_bull = (price >= sma_200)
         
         if dma_bull:
@@ -145,7 +157,7 @@ def generate_signal(indicators):
     return final_signal, conviction_status, vasl_trigger_level
 
 
-# --- Streamlit Application Layout (No Change) ---
+# --- Streamlit Application Layout ---
 
 def get_most_recent_trading_day():
     today = datetime.today().date()
@@ -218,6 +230,7 @@ def display_app():
         indicators = calculate_indicators(data_for_indicators, final_signal_price)
         final_signal, conviction_status, vasl_level = generate_signal(indicators)
     except Exception as e:
+        # Catch the specific ATR error here for a clean display
         st.error(f"FATAL ERROR during indicator calculation or signal generation: {e}")
         st.stop()
 
@@ -260,4 +273,5 @@ def display_app():
 
 if __name__ == "__main__":
     display_app()
+
 
