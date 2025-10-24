@@ -20,22 +20,21 @@ SMA_PERIOD = 200
 if 'override_price' not in st.session_state:
     st.session_state['override_price'] = None
 
-# --- Core Helper Function for Data Fetching and Cleaning ---
+# --- Core Helper Function for Data Fetching and Cleaning (THE FIX IS HERE) ---
 
 @st.cache_data(ttl=60*60*4) 
 def fetch_historical_data(target_date):
     """
-    Fetches historical data, using auto_adjust=False to guarantee OHLCV columns, 
-    then cleans and prepares the data with a case-insensitive renaming scheme.
+    Fetches historical data, using auto_adjust=False and forces the column
+    names to the required lowercase structure to bypass persistent platform errors.
     """
-    # yfinance 'end' date is exclusive.
     market_end_date = target_date + timedelta(days=1)
     start_date_daily = target_date - timedelta(days=400)
     
     st.info(f"Fetching historical data for {TICKER} up to {target_date.strftime('%Y-%m-%d')}...")
     
     try:
-        # CRITICAL: auto_adjust=False to keep High/Low/Adj Close columns
+        # CRITICAL: auto_adjust=False to keep all OHLCV/Adj Close data
         daily_data = yf.download(
             TICKER, 
             start=start_date_daily, 
@@ -50,42 +49,41 @@ def fetch_historical_data(target_date):
             st.error("yfinance returned an empty dataset. Check ticker and date range.")
             return pd.DataFrame()
             
-        # --- ROBUST COLUMN CLEANING (CASE-INSENSITIVE) ---
+        # --- ROBUST COLUMN FIX: FORCE COLUMN NAMES ---
         
-        # 1. Handle MultiIndex (if it exists)
+        # 1. Handle MultiIndex (if it exists) by dropping the top level
         if isinstance(daily_data.columns, pd.MultiIndex):
+            # This collapses the column structure (e.g., ('Close', 'QQQ') -> 'Close')
             daily_data.columns = daily_data.columns.droplevel(0)
 
-        # 2. Create a standardized list of column names
-        stock_cols = {'open', 'high', 'low', 'close', 'adj close', 'volume'}
-        col_map = {}
-        
-        for col in daily_data.columns:
-            # Match the lowercase column name to the standardized set
-            lower_col = str(col).lower()
-            if lower_col in stock_cols:
-                col_map[col] = lower_col
-        
-        daily_data.rename(columns=col_map, inplace=True)
+        # 2. Rename columns using the **EXACT ORDER** yfinance returns them
+        # Default yfinance order: Open, High, Low, Close, Adj Close, Volume
+        if daily_data.shape[1] >= 6:
+            daily_data.columns = [
+                'open',
+                'high',
+                'low',
+                'non_adj_close', # Placeholder for Close
+                'close',         # This MUST be the Adjusted Close for calculations
+                'volume'
+            ]
+        elif daily_data.shape[1] == 5:
+            # If auto_adjust=True was somehow used or it only returned 5 columns
+            daily_data.columns = ['open', 'high', 'low', 'close', 'volume']
+            
+        # --- END ROBUST COLUMN FIX ---
 
-        # 3. Finalize 'close': ensure 'adj close' becomes 'close' for indicators
-        if 'adj close' in daily_data.columns:
-            daily_data['close'] = daily_data['adj close']
-            daily_data.drop(columns=['adj close'], inplace=True)
-        # --- END ROBUST COLUMN CLEANING ---
-
-        # 4. Check for missing critical columns 
+        # 3. Check for missing critical columns
         required_cols = ['high', 'low', 'close', 'open', 'volume']
-        # Check against the final, renamed columns
         missing_cols = [c for c in ['high', 'low', 'close'] if c not in daily_data.columns]
         
         if missing_cols:
-             st.error(f"Data cleaning failed: Missing OHLC columns {missing_cols}.")
+             # This error should now be virtually impossible if yfinance returned 6 columns
+             st.error(f"Data cleaning failed (Final Check): Missing OHLC columns {missing_cols}. DataFrame shape: {daily_data.shape}")
              return pd.DataFrame()
 
-        # 5. Final data preparation
+        # 4. Final data preparation
         daily_data = daily_data[daily_data.index.date <= target_date]
-        # Only select required columns and ensure they are float after dropping NaNs
         data_for_indicators = daily_data[required_cols].dropna().astype(float)
         
         # Check for sufficient data
@@ -105,15 +103,12 @@ def fetch_historical_data(target_date):
 def calculate_indicators(data_daily, current_price):
     """Calculates all indicators using pandas-ta."""
     
-    # 1. 200-Day SMA
     data_daily.ta.sma(length=SMA_PERIOD, append=True)
     current_sma_200 = data_daily[f'SMA_{SMA_PERIOD}'].iloc[-1].item()
     
-    # 2. 5-Day EMA
     data_daily.ta.ema(length=EMA_PERIOD, append=True)
     latest_ema_5 = data_daily[f'EMA_{EMA_PERIOD}'].iloc[-1].item()
 
-    # 3. 14-Day ATR
     data_daily.ta.atr(length=ATR_PERIOD, append=True)
     latest_atr = data_daily[f'ATR_{ATR_PERIOD}'].iloc[-1].item()
 
@@ -132,14 +127,12 @@ def generate_signal(indicators):
     ema_5 = indicators['ema_5']
     atr = indicators['atr']
 
-    # --- 1. Volatility Stop-Loss (VASL) ---
     vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)
     
     if price < vasl_trigger_level:
         final_signal = "**SELL TQQQ / CASH (Exit)**"
         conviction_status = "VASL Triggered"
     else:
-        # --- 2. Conviction Filter (DMA) ---
         dma_bull = (price >= sma_200)
         
         if dma_bull:
@@ -267,5 +260,4 @@ def display_app():
 
 if __name__ == "__main__":
     display_app()
-
 
