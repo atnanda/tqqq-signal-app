@@ -34,7 +34,6 @@ def fetch_historical_data(target_date):
     st.info(f"Fetching historical data for {TICKER} up to {target_date.strftime('%Y-%m-%d')}...")
     
     try:
-        # CRITICAL: auto_adjust=False to keep all OHLCV/Adj Close data
         daily_data = yf.download(
             TICKER, 
             start=start_date_daily, 
@@ -50,28 +49,18 @@ def fetch_historical_data(target_date):
             return pd.DataFrame()
             
         # --- ROBUST COLUMN FIX: FORCE COLUMN NAMES ---
-        
-        # 1. Handle MultiIndex (if it exists) by dropping the top level
         if isinstance(daily_data.columns, pd.MultiIndex):
             daily_data.columns = daily_data.columns.droplevel(0)
 
-        # 2. Rename columns using the **EXACT ORDER** yfinance returns them
         if daily_data.shape[1] >= 6:
             daily_data.columns = [
-                'open',
-                'high',
-                'low',
-                'non_adj_close',
-                'close',         # Adjusted Close
-                'volume'
+                'open', 'high', 'low', 'non_adj_close', 'close', 'volume'
             ]
         elif daily_data.shape[1] == 5:
-            # Fallback for 5 columns
             daily_data.columns = ['open', 'high', 'low', 'close', 'volume']
             
         # --- END ROBUST COLUMN FIX ---
 
-        # 3. Check for missing critical columns
         required_cols = ['high', 'low', 'close', 'open', 'volume']
         missing_cols = [c for c in ['high', 'low', 'close'] if c not in daily_data.columns]
         
@@ -79,12 +68,9 @@ def fetch_historical_data(target_date):
              st.error(f"Data cleaning failed: Missing OHLC columns {missing_cols}. DataFrame shape: {daily_data.shape}")
              return pd.DataFrame()
 
-        # 4. Final data preparation
         daily_data = daily_data[daily_data.index.date <= target_date]
-        # Only select required columns and ensure they are float after dropping NaNs
         data_for_indicators = daily_data[required_cols].dropna().astype(float)
         
-        # Check for sufficient data
         if data_for_indicators.shape[0] < SMA_PERIOD:
             st.error(f"FATAL ERROR: Insufficient clean data ({data_for_indicators.shape[0]} rows) to calculate {SMA_PERIOD}-Day SMA.")
             return pd.DataFrame() 
@@ -95,43 +81,52 @@ def fetch_historical_data(target_date):
         st.error(f"FATAL ERROR during data download: {e}")
         return pd.DataFrame()
 
+# --- NEW MANUAL ATR CALCULATION FUNCTION (THE FIX) ---
+def calculate_true_range_and_atr(df, atr_period):
+    """Calculates True Range and Average True Range using native Pandas/Numpy."""
+    
+    # Calculate the three components of True Range (TR)
+    high_minus_low = df['high'] - df['low']
+    high_minus_prev_close = np.abs(df['high'] - df['close'].shift(1))
+    low_minus_prev_close = np.abs(df['low'] - df['close'].shift(1))
+    
+    # True Range is the maximum of the three components
+    true_range = pd.DataFrame({'hl': high_minus_low, 
+                               'hpc': high_minus_prev_close, 
+                               'lpc': low_minus_prev_close}).max(axis=1)
+    
+    # Average True Range (ATR) is the Exponential Moving Average of the True Range
+    atr_series = true_range.ewm(span=atr_period, adjust=False, min_periods=atr_period).mean()
+    
+    # Use ffill to get the last valid value, avoiding NaN errors
+    latest_atr = atr_series.ffill().iloc[-1]
 
-# --- Calculation and Signal Functions (Final Fix: Data Index Reset) ---
+    # Critical check: if the very first ATR value (at index ATR_PERIOD) is still NaN, fail cleanly.
+    if pd.isna(latest_atr):
+         # This should only happen if there aren't enough periods, but we checked this earlier.
+         raise ValueError("Manual ATR calculation failed to yield a finite value.")
+         
+    return latest_atr
+
+# --- Calculation and Signal Functions (Modified for Manual ATR) ---
 
 def calculate_indicators(data_daily, current_price):
-    """Calculates all indicators using pandas-ta and handles potential NaN results defensively."""
+    """Calculates all indicators using pandas-ta for SMA/EMA and manual calculation for ATR."""
     
-    # CRITICAL FIX: Reset the index and re-index by Date to resolve subtle pandas-ta conflicts
-    # We do this on a copy to ensure immutability, which often stabilizes indicator libraries.
-    df = data_daily.copy() 
+    # 1. 200-Day SMA (using pandas-ta)
+    data_daily.ta.sma(length=SMA_PERIOD, append=True)
+    current_sma_200 = data_daily[f'SMA_{SMA_PERIOD}'].iloc[-1].item()
     
-    # 1. 200-Day SMA
-    df.ta.sma(length=SMA_PERIOD, append=True)
-    current_sma_200 = df[f'SMA_{SMA_PERIOD}'].iloc[-1].item()
-    
-    # 2. 5-Day EMA
-    df.ta.ema(length=EMA_PERIOD, append=True)
-    latest_ema_5 = df[f'EMA_{EMA_PERIOD}'].iloc[-1].item()
+    # 2. 5-Day EMA (using pandas-ta)
+    data_daily.ta.ema(length=EMA_PERIOD, append=True)
+    latest_ema_5 = data_daily[f'EMA_{EMA_PERIOD}'].iloc[-1].item()
 
-    # 3. 14-Day ATR
-    atr_col_name = f'ATR_{ATR_PERIOD}'
-    
-    # Attempt the calculation
-    df.ta.atr(length=ATR_PERIOD, append=True)
-    
-    if atr_col_name not in df.columns:
-        # If the column still isn't created, the installation of pandas-ta is likely broken.
-        raise KeyError(f"Failed to calculate or access indicator: '{atr_col_name}'. Column not created.")
-
-    latest_atr_series = df[atr_col_name]
-    
-    # Use ffill() to get the last valid value, ensuring we don't fail on a trailing NaN.
-    latest_atr = latest_atr_series.ffill().iloc[-1].item()
+    # 3. 14-Day ATR (using manual calculation)
+    latest_atr = calculate_true_range_and_atr(data_daily.copy(), ATR_PERIOD)
     
     # Final check to ensure all values are actual finite numbers
     if not all(np.isfinite([current_sma_200, latest_ema_5, latest_atr])):
         raise ValueError("Indicator calculation resulted in infinite or non-numeric values.")
-
 
     return {
         'current_price': current_price,
@@ -228,7 +223,6 @@ def display_app():
     price_source_label = "Forced Override"
     
     if final_signal_price is None:
-        # Get the market price (Last Close/Adj Close) for the target date
         if not data_for_indicators.empty and data_for_indicators.index[-1].date() == target_date:
             final_signal_price = data_for_indicators['close'].iloc[-1].item()
             price_source_label = f"Close (Adjusted) of {target_date.strftime('%Y-%m-%d')}"
@@ -241,7 +235,6 @@ def display_app():
         indicators = calculate_indicators(data_for_indicators, final_signal_price)
         final_signal, conviction_status, vasl_level = generate_signal(indicators)
     except Exception as e:
-        # Catch the specific error here for a clean display
         st.error(f"FATAL ERROR during indicator calculation or signal generation: {e}")
         st.stop()
 
