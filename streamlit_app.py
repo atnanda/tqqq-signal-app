@@ -23,7 +23,7 @@ INVERSE_TICKER = "SQQQ"
 if 'override_price' not in st.session_state:
     st.session_state['override_price'] = None
 
-# --- Core Helper Function for Data Fetching and Cleaning (FINAL HARDENED FIX) ---
+# --- Core Helper Function for Data Fetching and Cleaning ---
 
 @st.cache_data(ttl=60*60*4) 
 def fetch_historical_data(target_date, lookback_days=400):
@@ -74,13 +74,11 @@ def fetch_historical_data(target_date, lookback_days=400):
                         df_combined[metric.lower()] = all_data[metric][ticker]
         
         # --- 2. Create Simple QQQ Columns for Indicators ---
-        # The simple 'close' column for QQQ must be explicitly set from the prefixed column.
         if f'{TICKER}_close' in df_combined.columns:
             df_combined['close'] = df_combined[f'{TICKER}_close']
             
         # --- 3. Final Validation and Cleanup ---
         
-        # Drop rows with any NaN values in critical columns
         required_cols = ['high', 'low', 'close', f'{LEVERAGED_TICKER}_close', f'{INVERSE_TICKER}_close']
         df_combined.dropna(subset=required_cols, inplace=True)
 
@@ -99,7 +97,7 @@ def fetch_historical_data(target_date, lookback_days=400):
         st.error(f"FATAL ERROR during data download: {e}")
         return pd.DataFrame()
 
-# --- Manual ATR Calculation (The reliable fix) ---
+# --- Manual ATR Calculation ---
 
 def calculate_true_range_and_atr(df, atr_period):
     """Calculates True Range and Average True Range using native Pandas/Numpy."""
@@ -206,7 +204,7 @@ class BacktestEngine:
         true_range = pd.DataFrame({'hl': high_minus_low, 'hpc': high_minus_prev_close, 'lpc': low_minus_prev_close}).max(axis=1)
         self.df['ATR'] = true_range.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean()
         
-        # Drop initial NaNs created by indicators. This is where the starting date is determined.
+        # Drop initial NaNs created by indicators. This sets the first tradable day.
         self.df.dropna(subset=[f'SMA_{SMA_PERIOD}', f'EMA_{EMA_PERIOD}', 'ATR'], inplace=True)
 
         if self.df.empty:
@@ -299,9 +297,10 @@ def run_backtests(full_data, target_date):
     # 'today' is a datetime.date object from the st.date_input
     today = target_date 
     
-    # Calculate start dates
-    # 1. FIXED: Get the actual first trading day AFTER indicator calculation for YTD
+    # Get the actual earliest tradable day from the cleaned data
     start_of_tradable_data = signals_df.index.min().date() 
+    
+    # Set YTD start date to Jan 1
     start_of_year = datetime(today.year, 1, 1).date()
     
     # Use the later date between Jan 1 and the first tradable day
@@ -312,8 +311,9 @@ def run_backtests(full_data, target_date):
     one_day_back = (today - timedelta(days=1))
 
     timeframes = [
-        # Use the determined ytd_start_date for the YTD period
-        ("Year-to-Date (YTD)", ytd_start_date),
+        # OPTION 1 IMPLEMENTED: Use the mathematically correct start date 
+        # but update the label to reflect the constraint.
+        ("YTD (Since First Valid Signal)", ytd_start_date),
         ("3 Months Back", three_months_back),
         ("1 Week Back", one_week_back),
         ("1 Day Back", one_day_back),
@@ -323,10 +323,10 @@ def run_backtests(full_data, target_date):
     
     for label, start_date in timeframes:
         if start_date >= today:
-             results.append({"Timeframe": label, "Start Date": start_of_year, "Strategy Value": INITIAL_INVESTMENT, "B&H QQQ Value": INITIAL_INVESTMENT, "P/L": 0.0, "B&H P/L": 0.0})
+             results.append({"Timeframe": label, "Start Date": start_of_year.strftime('%Y-%m-%d'), "Strategy Value": INITIAL_INVESTMENT, "B&H QQQ Value": INITIAL_INVESTMENT, "P/L": 0.0, "B&H P/L": 0.0})
              continue
              
-        # Find the actual first trading day for the start date
+        # Use the calculated start_date (which for YTD is the first valid signal day)
         relevant_dates = signals_df.index[signals_df.index.date >= start_date]
         first_trade_day = relevant_dates.min().date() if not relevant_dates.empty else None
 
@@ -409,12 +409,10 @@ def display_app():
 
     # 2. Determine Final Signal Price
     final_signal_price = st.session_state['override_price']
-    price_source_label = "Forced Override"
     
     if final_signal_price is None:
         if not data_for_indicators.empty and data_for_indicators.index[-1].date() == target_date:
             final_signal_price = data_for_indicators['close'].iloc[-1].item()
-            price_source_label = f"Close (Adjusted) of {target_date.strftime('%Y-%m-%d')}"
         else:
              st.error(f"FATAL ERROR: Could not find the Close price for {target_date.strftime('%Y-%m-%d')} in fetched data.")
              st.stop()
