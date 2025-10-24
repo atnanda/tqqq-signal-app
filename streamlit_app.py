@@ -15,6 +15,9 @@ EMA_PERIOD = 5
 ATR_PERIOD = 14
 ATR_MULTIPLIER = 2.0
 SMA_PERIOD = 200
+INITIAL_INVESTMENT = 10000.00
+LEVERAGED_TICKER = "TQQQ"
+INVERSE_TICKER = "SQQQ"
 
 # Initialize Session State for date/price overrides
 if 'override_price' not in st.session_state:
@@ -23,20 +26,22 @@ if 'override_price' not in st.session_state:
 # --- Core Helper Function for Data Fetching and Cleaning ---
 
 @st.cache_data(ttl=60*60*4) 
-def fetch_historical_data(target_date):
+def fetch_historical_data(target_date, lookback_days=400):
     """
-    Fetches historical data, using auto_adjust=False and forces the column
-    names to the required lowercase structure to bypass persistent platform errors.
+    Fetches historical data for QQQ, TQQQ, and SQQQ, cleans it, and returns a single DataFrame.
     """
     market_end_date = target_date + timedelta(days=1)
-    start_date_daily = target_date - timedelta(days=400)
+    start_date = target_date - timedelta(days=lookback_days)
     
-    st.info(f"Fetching historical data for {TICKER} up to {target_date.strftime('%Y-%m-%d')}...")
+    st.info(f"Fetching historical data for {TICKER}, {LEVERAGED_TICKER}, {INVERSE_TICKER} up to {target_date.strftime('%Y-%m-%d')}...")
     
     try:
-        daily_data = yf.download(
-            TICKER, 
-            start=start_date_daily, 
+        tickers = [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]
+        
+        # Fetch data for all required tickers
+        all_data = yf.download(
+            tickers, 
+            start=start_date, 
             end=market_end_date, 
             interval="1d", 
             progress=False,
@@ -44,44 +49,54 @@ def fetch_historical_data(target_date):
             timeout=15 
         )
         
-        if daily_data.empty:
-            st.error("yfinance returned an empty dataset. Check ticker and date range.")
+        if all_data.empty or (isinstance(all_data.columns, pd.MultiIndex) and all_data.columns.empty):
+            st.error("yfinance returned an empty dataset. Check tickers and date range.")
             return pd.DataFrame()
-            
-        # --- ROBUST COLUMN FIX: FORCE COLUMN NAMES ---
-        if isinstance(daily_data.columns, pd.MultiIndex):
-            daily_data.columns = daily_data.columns.droplevel(0)
 
-        if daily_data.shape[1] >= 6:
-            daily_data.columns = [
-                'open', 'high', 'low', 'non_adj_close', 'close', 'volume'
-            ]
-        elif daily_data.shape[1] == 5:
-            daily_data.columns = ['open', 'high', 'low', 'close', 'volume']
-            
-        # --- END ROBUST COLUMN FIX ---
+        # --- Data Cleaning and Structuring ---
+        clean_data = {}
+        for metric in ['Open', 'High', 'Low', 'Close', 'Adj Close', 'Volume']:
+            for ticker in tickers:
+                # Handle MultiIndex and use Adj Close as the primary price
+                col_name = f"{ticker}_{metric.lower().replace('adj close', 'close')}"
+                if metric in all_data.columns and ticker in all_data[metric].columns:
+                    clean_data[col_name] = all_data[metric][ticker].copy()
+                elif metric in all_data.columns and isinstance(all_data.columns, pd.MultiIndex):
+                    # Fallback for single-ticker download
+                    pass # This case is complex, rely on the core logic below
 
-        required_cols = ['high', 'low', 'close', 'open', 'volume']
-        missing_cols = [c for c in ['high', 'low', 'close'] if c not in daily_data.columns]
+        df_combined = pd.DataFrame(clean_data)
+        df_combined = df_combined.dropna()
+
+        # Rename core QQQ columns for indicator calculation
+        qqq_cols = {}
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            # The 'Adj Close' for QQQ has already been renamed to 'close' in the dictionary creation
+            qqq_cols[f'{TICKER}_{col}'] = col
+
+        df_combined.rename(columns=qqq_cols, inplace=True)
         
-        if missing_cols:
-             st.error(f"Data cleaning failed: Missing OHLC columns {missing_cols}. DataFrame shape: {daily_data.shape}")
+        # Check for QQQ required columns
+        required_qqq_cols = ['high', 'low', 'close', 'open', 'volume']
+        missing_qqq_cols = [c for c in required_qqq_cols if c not in df_combined.columns]
+        
+        if missing_qqq_cols:
+             st.error(f"Data cleaning failed: Missing QQQ OHLC columns {missing_qqq_cols} after cleaning.")
              return pd.DataFrame()
 
-        daily_data = daily_data[daily_data.index.date <= target_date]
-        data_for_indicators = daily_data[required_cols].dropna().astype(float)
-        
-        if data_for_indicators.shape[0] < SMA_PERIOD:
-            st.error(f"FATAL ERROR: Insufficient clean data ({data_for_indicators.shape[0]} rows) to calculate {SMA_PERIOD}-Day SMA.")
+        # Check for sufficient data
+        if df_combined.shape[0] < SMA_PERIOD:
+            st.error(f"FATAL ERROR: Insufficient clean data ({df_combined.shape[0]} rows) to calculate {SMA_PERIOD}-Day SMA.")
             return pd.DataFrame() 
             
-        return data_for_indicators
+        return df_combined[df_combined.index.date <= target_date]
 
     except Exception as e:
         st.error(f"FATAL ERROR during data download: {e}")
         return pd.DataFrame()
 
-# --- NEW MANUAL ATR CALCULATION FUNCTION (THE FIX) ---
+# --- Manual ATR Calculation (The reliable fix) ---
+
 def calculate_true_range_and_atr(df, atr_period):
     """Calculates True Range and Average True Range using native Pandas/Numpy."""
     
@@ -90,7 +105,6 @@ def calculate_true_range_and_atr(df, atr_period):
     high_minus_prev_close = np.abs(df['high'] - df['close'].shift(1))
     low_minus_prev_close = np.abs(df['low'] - df['close'].shift(1))
     
-    # True Range is the maximum of the three components
     true_range = pd.DataFrame({'hl': high_minus_low, 
                                'hpc': high_minus_prev_close, 
                                'lpc': low_minus_prev_close}).max(axis=1)
@@ -101,30 +115,34 @@ def calculate_true_range_and_atr(df, atr_period):
     # Use ffill to get the last valid value, avoiding NaN errors
     latest_atr = atr_series.ffill().iloc[-1]
 
-    # Critical check: if the very first ATR value (at index ATR_PERIOD) is still NaN, fail cleanly.
-    if pd.isna(latest_atr):
-         # This should only happen if there aren't enough periods, but we checked this earlier.
+    if pd.isna(latest_atr) or not np.isfinite(latest_atr):
          raise ValueError("Manual ATR calculation failed to yield a finite value.")
          
     return latest_atr
 
-# --- Calculation and Signal Functions (Modified for Manual ATR) ---
+
+# --- Calculation and Signal Functions ---
 
 def calculate_indicators(data_daily, current_price):
     """Calculates all indicators using pandas-ta for SMA/EMA and manual calculation for ATR."""
     
-    # 1. 200-Day SMA (using pandas-ta)
-    data_daily.ta.sma(length=SMA_PERIOD, append=True)
-    current_sma_200 = data_daily[f'SMA_{SMA_PERIOD}'].iloc[-1].item()
+    df = data_daily.copy() 
     
-    # 2. 5-Day EMA (using pandas-ta)
-    data_daily.ta.ema(length=EMA_PERIOD, append=True)
-    latest_ema_5 = data_daily[f'EMA_{EMA_PERIOD}'].iloc[-1].item()
+    # 1. 200-Day SMA
+    df.ta.sma(length=SMA_PERIOD, append=True)
+    current_sma_200 = df[f'SMA_{SMA_PERIOD}'].iloc[-1]
+    
+    # 2. 5-Day EMA
+    df.ta.ema(length=EMA_PERIOD, append=True)
+    latest_ema_5 = df[f'EMA_{EMA_PERIOD}'].iloc[-1]
 
-    # 3. 14-Day ATR (using manual calculation)
-    latest_atr = calculate_true_range_and_atr(data_daily.copy(), ATR_PERIOD)
+    # 3. 14-Day ATR
+    latest_atr = calculate_true_range_and_atr(df, ATR_PERIOD)
     
-    # Final check to ensure all values are actual finite numbers
+    # Final check and conversion
+    current_sma_200 = current_sma_200.item() if hasattr(current_sma_200, 'item') else current_sma_200
+    latest_ema_5 = latest_ema_5.item() if hasattr(latest_ema_5, 'item') else latest_ema_5
+
     if not all(np.isfinite([current_sma_200, latest_ema_5, latest_atr])):
         raise ValueError("Indicator calculation resulted in infinite or non-numeric values.")
 
@@ -148,6 +166,7 @@ def generate_signal(indicators):
     
     if price < vasl_trigger_level:
         final_signal = "**SELL TQQQ / CASH (Exit)**"
+        trade_ticker = 'CASH'
         conviction_status = "VASL Triggered"
     else:
         # --- 2. Conviction Filter (DMA) ---
@@ -156,12 +175,168 @@ def generate_signal(indicators):
         if dma_bull:
             conviction_status = "DMA - Bull (LONG TQQQ Default)"
             final_signal = "**BUY TQQQ**"
+            trade_ticker = LEVERAGED_TICKER
         else:
             conviction_status = "DMA - Bear (CASH/SQQQ Default)"
             final_signal = "**BUY SQQQ**"
+            trade_ticker = INVERSE_TICKER
 
-    return final_signal, conviction_status, vasl_trigger_level
+    return final_signal, trade_ticker, conviction_status, vasl_trigger_level
 
+
+# --- Backtesting Engine ---
+
+class BacktestEngine:
+    """Runs a backtest simulation for a given historical dataset."""
+    
+    def __init__(self, historical_data):
+        self.df = historical_data.copy()
+        
+    def generate_historical_signals(self):
+        """Generates the trading signal and conviction status for every day in the history."""
+        
+        # 1. Calculate SMA and EMA (once)
+        self.df.ta.sma(length=SMA_PERIOD, append=True)
+        self.df.ta.ema(length=EMA_PERIOD, append=True)
+        
+        # 2. Manually calculate ATR (bypassing pandas-ta for robustness)
+        high_minus_low = self.df['high'] - self.df['low']
+        high_minus_prev_close = np.abs(self.df['high'] - self.df['close'].shift(1))
+        low_minus_prev_close = np.abs(self.df['low'] - self.df['close'].shift(1))
+        true_range = pd.DataFrame({'hl': high_minus_low, 'hpc': high_minus_prev_close, 'lpc': low_minus_prev_close}).max(axis=1)
+        self.df['ATR'] = true_range.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean()
+        
+        # Drop initial NaNs created by indicators
+        self.df.dropna(subset=[f'SMA_{SMA_PERIOD}', f'EMA_{EMA_PERIOD}', 'ATR'], inplace=True)
+
+        if self.df.empty:
+            return pd.DataFrame()
+
+        # 3. Apply the trading logic row by row
+        signals = []
+        for index, row in self.df.iterrows():
+            ema_5 = row[f'EMA_{EMA_PERIOD}']
+            sma_200 = row[f'SMA_{SMA_PERIOD}']
+            atr = row['ATR']
+            price = row['close']
+            
+            vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)
+            
+            if price < vasl_trigger_level:
+                trade_ticker = 'CASH'
+            else:
+                dma_bull = (price >= sma_200)
+                trade_ticker = LEVERAGED_TICKER if dma_bull else INVERSE_TICKER
+            
+            signals.append(trade_ticker)
+
+        self.df['Trade_Ticker'] = signals
+        return self.df
+        
+    def run_simulation(self, start_date):
+        """Runs the $10k simulation from the start date to the end of the data."""
+        
+        sim_df = self.df[self.df.index >= start_date].copy()
+        
+        if sim_df.empty:
+            return INITIAL_INVESTMENT, 0
+            
+        initial_investment = INITIAL_INVESTMENT
+        portfolio_value = initial_investment
+        shares = 0
+        current_ticker = 'CASH'
+
+        # Loop through trading days
+        for i in range(len(sim_df)):
+            current_day = sim_df.iloc[i]
+            trade_ticker = current_day['Trade_Ticker']
+            
+            # --- 1. Rebalance (Sell Old, Buy New) ---
+            if trade_ticker != current_ticker:
+                # Sell current position for CASH (using today's closing price)
+                if current_ticker != 'CASH':
+                    sell_price_col = f'{current_ticker}_close'
+                    portfolio_value = shares * current_day[sell_price_col]
+                    shares = 0
+                
+                # Buy new position (using today's closing price)
+                if trade_ticker != 'CASH':
+                    buy_price_col = f'{trade_ticker}_close'
+                    shares = portfolio_value / current_day[buy_price_col]
+                
+                current_ticker = trade_ticker
+
+            # --- 2. Track Value ---
+            # If still holding shares, update portfolio value based on today's close
+            if shares > 0:
+                current_price_col = f'{current_ticker}_close'
+                portfolio_value = shares * current_day[current_price_col]
+            
+            sim_df.loc[current_day.name, 'Portfolio_Value'] = portfolio_value
+
+        # Calculate final buy-and-hold value for comparison
+        qqq_start_price = sim_df.iloc[0][f'{TICKER}_close']
+        qqq_end_price = sim_df.iloc[-1][f'{TICKER}_close']
+        buy_and_hold_qqq = initial_investment * (qqq_end_price / qqq_start_price)
+
+        return portfolio_value, buy_and_hold_qqq
+
+
+def run_backtests(full_data, target_date):
+    """Defines timeframes and runs the backtesting engine."""
+    
+    backtester = BacktestEngine(full_data)
+    # Generate historical signals for the entire period once
+    signals_df = backtester.generate_historical_signals()
+    
+    if signals_df.empty:
+        st.error("Backtest failed: Could not generate historical signals.")
+        return []
+
+    today = target_date
+    
+    # Calculate start dates
+    start_of_year = datetime(today.year, 1, 1).date()
+    three_months_back = (today - timedelta(days=90))
+    one_week_back = (today - timedelta(days=7))
+    one_day_back = (today - timedelta(days=1))
+
+    timeframes = [
+        ("Year-to-Date (YTD)", start_of_year),
+        ("3 Months Back", three_months_back),
+        ("1 Week Back", one_week_back),
+        ("1 Day Back", one_day_back),
+    ]
+    
+    results = []
+    
+    for label, start_date in timeframes:
+        if start_date >= today:
+             results.append({"Timeframe": label, "Start Date": start_date, "Strategy Value": INITIAL_INVESTMENT, "B&H QQQ Value": INITIAL_INVESTMENT, "P/L": 0.0, "B&H P/L": 0.0})
+             continue
+             
+        # Find the actual first trading day for the start date
+        first_trade_day = signals_df.index[signals_df.index.date >= start_date].min()
+        
+        if pd.isna(first_trade_day):
+            st.warning(f"Skipping {label}: No trading data available on or after {start_date.strftime('%Y-%m-%d')}.")
+            continue
+            
+        final_value, buy_and_hold_qqq = backtester.run_simulation(first_trade_day)
+        
+        profit_loss = final_value - INITIAL_INVESTMENT
+        bh_profit_loss = buy_and_hold_qqq - INITIAL_INVESTMENT
+        
+        results.append({
+            "Timeframe": label,
+            "Start Date": first_trade_day.strftime('%Y-%m-%d'),
+            "Strategy Value": final_value,
+            "B&H QQQ Value": buy_and_hold_qqq,
+            "P/L": profit_loss,
+            "B&H P/L": bh_profit_loss
+        })
+        
+    return results
 
 # --- Streamlit Application Layout ---
 
@@ -175,7 +350,7 @@ def get_most_recent_trading_day():
 def display_app():
     
     st.set_page_config(page_title="TQQQ/SQQQ Signal", layout="wide")
-    st.title("📈 TQQQ/SQQQ Daily Signal Generator")
+    st.title("📈 TQQQ/SQQQ Daily Signal Generator & Backtester")
     st.markdown("Strategy based on **200-Day SMA** (Conviction) and **5-Day EMA/14-Day ATR** (Volatility Stop-Loss).")
     st.markdown("---")
 
@@ -208,11 +383,13 @@ def display_app():
         st.metric("EMA Period (VASL)", f"{EMA_PERIOD} days")
         st.metric("ATR Period (VASL)", f"{ATR_PERIOD} days")
         st.metric("ATR Multiplier (VASL)", ATR_MULTIPLIER)
+        st.metric("Backtest Capital", f"${INITIAL_INVESTMENT:,.2f}")
+
 
     # --- Main Logic ---
 
     # 1. Data Fetch
-    data_for_indicators = fetch_historical_data(target_date)
+    data_for_indicators = fetch_historical_data(target_date, lookback_days=400)
 
     if data_for_indicators.empty:
         st.error("FATAL ERROR: Signal calculation aborted due to insufficient or missing data.")
@@ -233,18 +410,18 @@ def display_app():
     # 3. Calculate and Generate Signal
     try:
         indicators = calculate_indicators(data_for_indicators, final_signal_price)
-        final_signal, conviction_status, vasl_level = generate_signal(indicators)
+        final_signal, trade_ticker, conviction_status, vasl_level = generate_signal(indicators)
     except Exception as e:
         st.error(f"FATAL ERROR during indicator calculation or signal generation: {e}")
         st.stop()
 
-    # --- 4. Display Results ---
-
-    st.header(f"Signal based on {TICKER} Price at: {target_date.strftime('%Y-%m-%d')}")
-    st.markdown(f"**Execution Price Source:** *{price_source_label}*")
+    # 4. Run Backtests
+    backtest_results = run_backtests(data_for_indicators, target_date)
     
-    st.markdown("---")
-
+    # --- 5. Display Results: CURRENT SIGNAL ---
+    
+    st.header(f"Today's Signal based on {TICKER} Price at: {target_date.strftime('%Y-%m-%d')}")
+    
     # Signal Box Display
     if "BUY TQQQ" in final_signal:
         st.success(f"## {final_signal}")
@@ -270,10 +447,41 @@ def display_app():
 
     if "Triggered" in conviction_status:
         col_vasl_status.error(f"**VASL Trigger Level:** ${vasl_level:.2f}")
-        col_vasl_status.error(f"Price (${indicators['current_price']:.2f}) is **BELOW** the stop-loss level.")
     else:
         col_vasl_status.success(f"**VASL Trigger Level:** ${vasl_level:.2f}")
-        col_vasl_status.markdown(f"Price (${indicators['current_price']:.2f}) is **ABOVE** the VASL level.")
+
+    st.markdown("---")
+    
+    # --- 6. Display Results: BACKTESTING ---
+    st.header("⏱️ Backtest Performance (vs. QQQ Buy & Hold)")
+    st.markdown(f"**Simulation:** \$10,000 initial investment traded based on historical daily signals.")
+
+    if backtest_results:
+        # Prepare DataFrame for display
+        df_results = pd.DataFrame(backtest_results)
+        
+        # Format the numbers for readability
+        df_results['Strategy Value'] = df_results['Strategy Value'].map('${:,.2f}'.format)
+        df_results['B&H QQQ Value'] = df_results['B&H QQQ Value'].map('${:,.2f}'.format)
+        df_results['P/L'] = df_results['P/L'].map(lambda x: f"{'+' if x >= 0 else ''}${x:,.2f}")
+        df_results['B&H P/L'] = df_results['B&H P/L'].map(lambda x: f"{'+' if x >= 0 else ''}${x:,.2f}")
+        
+        df_results = df_results.rename(columns={
+            "B&H QQQ Value": "B&H Value",
+            "B&H P/L": "B&H P/L",
+        })
+        
+        # Apply conditional coloring to P/L columns
+        st.dataframe(df_results, 
+            column_config={
+                "Start Date": st.column_config.DatetimeColumn("Start Date", format="YYYY-MM-DD"),
+                "P/L": st.column_config.Column("Strategy P/L", help="Strategy Profit/Loss", width="small"),
+                "B&H P/L": st.column_config.Column("B&H P/L", help="Buy & Hold Profit/Loss", width="small")
+            },
+            hide_index=True)
+    else:
+        st.warning("No backtesting results generated for the selected date range.")
+
 
 if __name__ == "__main__":
     display_app()
