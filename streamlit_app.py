@@ -32,7 +32,9 @@ def fetch_historical_data(target_date, lookback_days=400):
     prefixed columns ('QQQ_close', 'TQQQ_close', 'SQQQ_close') and 
     simple columns ('close', 'high', 'low') are present.
     """
-    market_end_date = target_date + timedelta(days=1)
+    # yfinance fetches data up to, but not including, the 'end' date. 
+    # Adding a day ensures we get data for the target_date.
+    market_end_date = target_date + timedelta(days=1) 
     start_date = target_date - timedelta(days=lookback_days)
     
     # st.info(f"Fetching historical data for {TICKER}, {LEVERAGED_TICKER}, {INVERSE_TICKER} up to {target_date.strftime('%Y-%m-%d')}...")
@@ -46,7 +48,7 @@ def fetch_historical_data(target_date, lookback_days=400):
             end=market_end_date, 
             interval="1d", 
             progress=False,
-            auto_adjust=False, 
+            auto_adjust=False, # We handle Adjusted Close explicitly
             timeout=15 
         )
         
@@ -59,12 +61,12 @@ def fetch_historical_data(target_date, lookback_days=400):
         
         # Iterate through the required columns and tickers
         for ticker in tickers:
-            # 1a. Prioritize Adjusted Close as the 'close' price
+            # 1a. Prioritize Adjusted Close for all tickers
             close_col_name = f"{ticker}_close"
             if ('Adj Close', ticker) in all_data.columns:
                 df_combined[close_col_name] = all_data['Adj Close'][ticker]
             elif ('Close', ticker) in all_data.columns:
-                # Fallback to non-adjusted Close if Adj Close is missing (rare for QQQ, but safe)
+                # Fallback to non-adjusted Close 
                 df_combined[close_col_name] = all_data['Close'][ticker]
             
             # 1b. Get OHLCV data for QQQ (needed for indicator calculation)
@@ -74,6 +76,7 @@ def fetch_historical_data(target_date, lookback_days=400):
                         df_combined[metric.lower()] = all_data[metric][ticker]
         
         # --- 2. Create Simple QQQ Columns for Indicators ---
+        # The generic 'close' is used by pandas_ta for indicator calculation
         if f'{TICKER}_close' in df_combined.columns:
             df_combined['close'] = df_combined[f'{TICKER}_close']
             
@@ -91,6 +94,7 @@ def fetch_historical_data(target_date, lookback_days=400):
             st.error(f"FATAL ERROR: Insufficient clean data ({df_combined.shape[0]} rows) to calculate {SMA_PERIOD}-Day SMA.")
             return pd.DataFrame() 
             
+        # Filter data to only include dates up to the target date
         return df_combined[df_combined.index.date <= target_date]
 
     except Exception as e:
@@ -110,6 +114,7 @@ def calculate_true_range_and_atr(df, atr_period):
                                'hpc': high_minus_prev_close, 
                                'lpc': low_minus_prev_close}).max(axis=1)
     
+    # Use EWM (Exponential Weighted Moving Average) for ATR calculation
     atr_series = true_range.ewm(span=atr_period, adjust=False, min_periods=atr_period).mean()
     
     latest_atr = atr_series.ffill().iloc[-1]
@@ -311,8 +316,7 @@ def run_backtests(full_data, target_date):
     one_day_back = (today - timedelta(days=1))
 
     timeframes = [
-        # OPTION 1 IMPLEMENTED: Use the mathematically correct start date 
-        # but update the label to reflect the constraint.
+        # Use the mathematically correct start date but update the label to reflect the constraint.
         ("YTD (Since First Valid Signal)", ytd_start_date),
         ("3 Months Back", three_months_back),
         ("1 Week Back", one_week_back),
@@ -355,6 +359,7 @@ def run_backtests(full_data, target_date):
 def get_most_recent_trading_day():
     today = datetime.today().date()
     target_date = today
+    # Find the last weekday (Mon-Fri)
     while target_date.weekday() > 4: # 5=Saturday, 6=Sunday
         target_date -= timedelta(days=1)
     return target_date
@@ -389,6 +394,12 @@ def display_app():
             help="Enter a price here to manually test the strategy at a specific level."
         )
 
+        # --- CRITICAL CACHE CLEAR BUTTON ---
+        if st.button("Clear Data Cache & Rerun", help="Click this if the price or indicators look outdated. Forces a fresh download."):
+            st.cache_data.clear()
+            st.rerun()
+        # --- END CACHE CLEAR BUTTON ---
+
         st.header("2. Strategy Parameters")
         st.metric("Ticker", TICKER)
         st.metric("SMA Period (DMA)", f"{SMA_PERIOD} days")
@@ -410,20 +421,18 @@ def display_app():
     # 2. Determine Final Signal Price
     final_signal_price = st.session_state['override_price']
     
-    # --- HARDENED FIX FOR PRICE SELECTION ---
+    # --- HARDENED PRICE SELECTION ---
     qqq_close_col_name = f'{TICKER}_close'
     
     if final_signal_price is None:
         try:
-            # 2a. Explicitly use .loc to find the QQQ Adjusted Close for the target date
-            # Ensure the index is converted to date objects for comparison if necessary, 
-            # but using the date index directly is usually safest.
+            # 2a. Explicitly look for the QQQ Adjusted Close for the target date
             price_row = data_for_indicators.loc[data_for_indicators.index.date == target_date]
             
             if not price_row.empty:
                 final_signal_price = price_row[qqq_close_col_name].iloc[0].item()
             else:
-                 # Fallback to the last available price if the exact date is missing (e.g., if market closed early)
+                 # Fallback to the last available price if the exact date is missing (e.g., if market closed late/early)
                  final_signal_price = data_for_indicators[qqq_close_col_name].iloc[-1].item()
         
         except KeyError:
@@ -432,6 +441,7 @@ def display_app():
         except Exception:
              st.error(f"FATAL ERROR: Could not find the Adjusted Close price for {target_date.strftime('%Y-%m-%d')} in fetched data.")
              st.stop()
+    # --- END HARDENED PRICE SELECTION ---
 
     # 3. Calculate and Generate Signal
     try:
@@ -480,7 +490,7 @@ def display_app():
     
     # --- 6. Display Results: BACKTESTING ---
     st.header("⏱️ Backtest Performance (vs. QQQ Buy & Hold)")
-    st.markdown(f"**Simulation:** $10,000 initial investment traded based on historical daily signals.")
+    st.markdown(f"**Simulation:** ${INITIAL_INVESTMENT:,.2f} initial investment traded based on historical daily signals.")
 
     if backtest_results:
         # Prepare DataFrame for display
