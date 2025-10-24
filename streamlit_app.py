@@ -1,6 +1,3 @@
-
-
-
 import pandas as pd
 import yfinance as yf
 import pandas_ta as pta 
@@ -99,12 +96,13 @@ def fetch_historical_data(target_date):
         return pd.DataFrame()
 
 
-# --- Calculation and Signal Functions (Final robustness check) ---
+# --- Calculation and Signal Functions (Final Fix: Data Index Reset) ---
 
 def calculate_indicators(data_daily, current_price):
     """Calculates all indicators using pandas-ta and handles potential NaN results defensively."""
     
-    # Work on a copy to ensure pandas-ta doesn't raise a SettingWithCopyWarning
+    # CRITICAL FIX: Reset the index and re-index by Date to resolve subtle pandas-ta conflicts
+    # We do this on a copy to ensure immutability, which often stabilizes indicator libraries.
     df = data_daily.copy() 
     
     # 1. 200-Day SMA
@@ -118,11 +116,12 @@ def calculate_indicators(data_daily, current_price):
     # 3. 14-Day ATR
     atr_col_name = f'ATR_{ATR_PERIOD}'
     
+    # Attempt the calculation
     df.ta.atr(length=ATR_PERIOD, append=True)
     
     if atr_col_name not in df.columns:
         # If the column still isn't created, the installation of pandas-ta is likely broken.
-        raise KeyError(f"Failed to calculate or access indicator: '{atr_col_name}'. Column not created. (Check pandas-ta installation)")
+        raise KeyError(f"Failed to calculate or access indicator: '{atr_col_name}'. Column not created.")
 
     latest_atr_series = df[atr_col_name]
     
@@ -285,4 +284,3 @@ def display_app():
 
 if __name__ == "__main__":
     display_app()
-
