@@ -20,29 +20,29 @@ SMA_PERIOD = 200
 if 'override_price' not in st.session_state:
     st.session_state['override_price'] = None
 
-# --- Core Helper Function for Column Cleaning ---
+# --- Core Helper Function for Data Fetching and Cleaning ---
 
 @st.cache_data(ttl=60*60*4) 
 def fetch_historical_data(target_date):
     """
-    Fetches historical data up to the trading day (inclusive) and cleans columns.
-    Uses the robust yfinance method.
+    Fetches historical data, using auto_adjust=False to guarantee OHLCV columns, 
+    then cleans and prepares the data with a case-insensitive renaming scheme.
     """
-    # yfinance 'end' date is exclusive, so we fetch up to the day *after* the target.
+    # yfinance 'end' date is exclusive.
     market_end_date = target_date + timedelta(days=1)
-    start_date_daily = target_date - timedelta(days=400) # Ensure enough data for 200 SMA
+    start_date_daily = target_date - timedelta(days=400)
     
     st.info(f"Fetching historical data for {TICKER} up to {target_date.strftime('%Y-%m-%d')}...")
     
     try:
-        # Use auto_adjust=True for simplicity, let the cleaning handle any format issues
+        # CRITICAL: auto_adjust=False to keep High/Low/Adj Close columns
         daily_data = yf.download(
             TICKER, 
             start=start_date_daily, 
             end=market_end_date, 
             interval="1d", 
             progress=False,
-            auto_adjust=True, 
+            auto_adjust=False, 
             timeout=15 
         )
         
@@ -50,37 +50,45 @@ def fetch_historical_data(target_date):
             st.error("yfinance returned an empty dataset. Check ticker and date range.")
             return pd.DataFrame()
             
-        # --- ROBUST COLUMN CLEANING FIX ---
+        # --- ROBUST COLUMN CLEANING (CASE-INSENSITIVE) ---
         
         # 1. Handle MultiIndex (if it exists)
         if isinstance(daily_data.columns, pd.MultiIndex):
-            # Drop the top level, typically the ticker name
             daily_data.columns = daily_data.columns.droplevel(0)
 
-        # 2. Standardize and lowercase all column names for pandas-ta
-        new_cols = {}
+        # 2. Create a standardized list of column names
+        stock_cols = {'open', 'high', 'low', 'close', 'adj close', 'volume'}
+        col_map = {}
+        
         for col in daily_data.columns:
-            clean_col = str(col).lower().replace('adj close', 'close')
-            new_cols[col] = clean_col
+            # Match the lowercase column name to the standardized set
+            lower_col = str(col).lower()
+            if lower_col in stock_cols:
+                col_map[col] = lower_col
+        
+        daily_data.rename(columns=col_map, inplace=True)
 
-        daily_data.rename(columns=new_cols, inplace=True)
-        # --- END ROBUST COLUMN CLEANING FIX ---
-        
-        # Ensure only the necessary columns remain and types are float
-        required_cols = ['open', 'high', 'low', 'close', 'volume']
-        
-        # Check for missing critical columns BEFORE removing NaNs
+        # 3. Finalize 'close': ensure 'adj close' becomes 'close' for indicators
+        if 'adj close' in daily_data.columns:
+            daily_data['close'] = daily_data['adj close']
+            daily_data.drop(columns=['adj close'], inplace=True)
+        # --- END ROBUST COLUMN CLEANING ---
+
+        # 4. Check for missing critical columns 
+        required_cols = ['high', 'low', 'close', 'open', 'volume']
+        # Check against the final, renamed columns
         missing_cols = [c for c in ['high', 'low', 'close'] if c not in daily_data.columns]
+        
         if missing_cols:
              st.error(f"Data cleaning failed: Missing OHLC columns {missing_cols}.")
              return pd.DataFrame()
 
-        # Remove rows that are beyond the target date
+        # 5. Final data preparation
         daily_data = daily_data[daily_data.index.date <= target_date]
-        
-        # Drop all rows with NaNs (required before pandas-ta calculation)
+        # Only select required columns and ensure they are float after dropping NaNs
         data_for_indicators = daily_data[required_cols].dropna().astype(float)
         
+        # Check for sufficient data
         if data_for_indicators.shape[0] < SMA_PERIOD:
             st.error(f"FATAL ERROR: Insufficient clean data ({data_for_indicators.shape[0]} rows) to calculate {SMA_PERIOD}-Day SMA.")
             return pd.DataFrame() 
@@ -92,12 +100,10 @@ def fetch_historical_data(target_date):
         return pd.DataFrame()
 
 
-# --- Calculation and Signal Functions (Using pandas-ta) ---
+# --- Calculation and Signal Functions (No Change) ---
 
 def calculate_indicators(data_daily, current_price):
-    """
-    Calculates the required technical indicators (SMA, EMA, ATR) using pandas-ta.
-    """
+    """Calculates all indicators using pandas-ta."""
     
     # 1. 200-Day SMA
     data_daily.ta.sma(length=SMA_PERIOD, append=True)
@@ -120,9 +126,7 @@ def calculate_indicators(data_daily, current_price):
 
 
 def generate_signal(indicators):
-    """
-    Applies the defined trading strategy logic: VASL and DMA.
-    """
+    """Applies the defined trading strategy logic: VASL and DMA."""
     price = indicators['current_price']
     sma_200 = indicators['sma_200']
     ema_5 = indicators['ema_5']
@@ -145,14 +149,13 @@ def generate_signal(indicators):
             conviction_status = "DMA - Bear (CASH/SQQQ Default)"
             final_signal = "**BUY SQQQ**"
 
-    return final_signal, conviction_status, vasl_level
+    return final_signal, conviction_status, vasl_trigger_level
 
 
-# --- Streamlit Application Layout ---
+# --- Streamlit Application Layout (No Change) ---
 
 def get_most_recent_trading_day():
     today = datetime.today().date()
-    # Adjust target date back to the most recent weekday
     target_date = today
     while target_date.weekday() > 4: # 5=Saturday, 6=Sunday
         target_date -= timedelta(days=1)
@@ -209,10 +212,10 @@ def display_app():
     price_source_label = "Forced Override"
     
     if final_signal_price is None:
-        # Get the market price (Last Close) for the target date
+        # Get the market price (Last Close/Adj Close) for the target date
         if not data_for_indicators.empty and data_for_indicators.index[-1].date() == target_date:
             final_signal_price = data_for_indicators['close'].iloc[-1].item()
-            price_source_label = f"Close of {target_date.strftime('%Y-%m-%d')}"
+            price_source_label = f"Close (Adjusted) of {target_date.strftime('%Y-%m-%d')}"
         else:
              st.error(f"FATAL ERROR: Could not find the Close price for {target_date.strftime('%Y-%m-%d')} in fetched data.")
              st.stop()
