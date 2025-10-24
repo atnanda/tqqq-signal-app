@@ -206,7 +206,7 @@ class BacktestEngine:
         true_range = pd.DataFrame({'hl': high_minus_low, 'hpc': high_minus_prev_close, 'lpc': low_minus_prev_close}).max(axis=1)
         self.df['ATR'] = true_range.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean()
         
-        # Drop initial NaNs created by indicators
+        # Drop initial NaNs created by indicators. This is where the starting date is determined.
         self.df.dropna(subset=[f'SMA_{SMA_PERIOD}', f'EMA_{EMA_PERIOD}', 'ATR'], inplace=True)
 
         if self.df.empty:
@@ -300,13 +300,20 @@ def run_backtests(full_data, target_date):
     today = target_date 
     
     # Calculate start dates
+    # 1. FIXED: Get the actual first trading day AFTER indicator calculation for YTD
+    start_of_tradable_data = signals_df.index.min().date() 
     start_of_year = datetime(today.year, 1, 1).date()
+    
+    # Use the later date between Jan 1 and the first tradable day
+    ytd_start_date = max(start_of_year, start_of_tradable_data) 
+    
     three_months_back = (today - timedelta(days=90))
     one_week_back = (today - timedelta(days=7))
     one_day_back = (today - timedelta(days=1))
 
     timeframes = [
-        ("Year-to-Date (YTD)", start_of_year),
+        # Use the determined ytd_start_date for the YTD period
+        ("Year-to-Date (YTD)", ytd_start_date),
         ("3 Months Back", three_months_back),
         ("1 Week Back", one_week_back),
         ("1 Day Back", one_day_back),
@@ -415,7 +422,6 @@ def display_app():
     # 3. Calculate and Generate Signal
     try:
         indicators = calculate_indicators(data_for_indicators, final_signal_price)
-        # FIX APPLIED HERE: Unpack 'vasl_trigger_level' instead of 'vasl_level'
         final_signal, trade_ticker, conviction_status, vasl_trigger_level = generate_signal(indicators) 
     except Exception as e:
         st.error(f"FATAL ERROR during indicator calculation or signal generation: {e}")
@@ -452,17 +458,14 @@ def display_app():
     col_vasl_level.metric("14-Day ATR", f"${indicators['atr']:.2f}")
 
     if "Triggered" in conviction_status:
-        # Use the correctly unpacked variable here
         col_vasl_status.error(f"**VASL Trigger Level:** ${vasl_trigger_level:.2f}") 
     else:
-        # Use the correctly unpacked variable here
         col_vasl_status.success(f"**VASL Trigger Level:** ${vasl_trigger_level:.2f}")
 
     st.markdown("---")
     
     # --- 6. Display Results: BACKTESTING ---
     st.header("⏱️ Backtest Performance (vs. QQQ Buy & Hold)")
-    # FIXED SYNTAX WARNING: Removed backslash from $10,000
     st.markdown(f"**Simulation:** $10,000 initial investment traded based on historical daily signals.")
 
     if backtest_results:
