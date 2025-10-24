@@ -1,6 +1,6 @@
 # requirements.txt
 pandas
-numpy
 yfinance
-streamlit
 pandas-ta
+numpy
+streamlit
