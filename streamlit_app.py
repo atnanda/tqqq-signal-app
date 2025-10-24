@@ -1,3 +1,6 @@
+
+
+
 import pandas as pd
 import yfinance as yf
 import pandas_ta as pta 
@@ -115,8 +118,6 @@ def calculate_indicators(data_daily, current_price):
     # 3. 14-Day ATR
     atr_col_name = f'ATR_{ATR_PERIOD}'
     
-    # pandas-ta can fail here if the installation is bad or data types are subtly wrong,
-    # but since data_daily is confirmed to be float, this should proceed.
     df.ta.atr(length=ATR_PERIOD, append=True)
     
     if atr_col_name not in df.columns:
@@ -284,6 +285,4 @@ def display_app():
 
 if __name__ == "__main__":
     display_app()
-
-
 
