@@ -56,18 +56,17 @@ def fetch_historical_data(target_date):
             daily_data.columns = daily_data.columns.droplevel(0)
 
         # 2. Rename columns using the **EXACT ORDER** yfinance returns them
-        # Default yfinance order (6 columns): Open, High, Low, Close, Adj Close, Volume
         if daily_data.shape[1] >= 6:
             daily_data.columns = [
                 'open',
                 'high',
                 'low',
-                'non_adj_close', # Placeholder for non-adjusted Close
-                'close',         # This MUST be the Adjusted Close for calculations
+                'non_adj_close',
+                'close',         # Adjusted Close
                 'volume'
             ]
         elif daily_data.shape[1] == 5:
-            # Fallback for 5 columns (likely only if auto_adjust=True was somehow used)
+            # Fallback for 5 columns
             daily_data.columns = ['open', 'high', 'low', 'close', 'volume']
             
         # --- END ROBUST COLUMN FIX ---
@@ -97,33 +96,39 @@ def fetch_historical_data(target_date):
         return pd.DataFrame()
 
 
-# --- Calculation and Signal Functions (FINAL FIX FOR NaN/ATR) ---
+# --- Calculation and Signal Functions (Final robustness check) ---
 
 def calculate_indicators(data_daily, current_price):
     """Calculates all indicators using pandas-ta and handles potential NaN results defensively."""
     
+    # Work on a copy to ensure pandas-ta doesn't raise a SettingWithCopyWarning
+    df = data_daily.copy() 
+    
     # 1. 200-Day SMA
-    data_daily.ta.sma(length=SMA_PERIOD, append=True)
-    current_sma_200 = data_daily[f'SMA_{SMA_PERIOD}'].iloc[-1].item()
+    df.ta.sma(length=SMA_PERIOD, append=True)
+    current_sma_200 = df[f'SMA_{SMA_PERIOD}'].iloc[-1].item()
     
     # 2. 5-Day EMA
-    data_daily.ta.ema(length=EMA_PERIOD, append=True)
-    latest_ema_5 = data_daily[f'EMA_{EMA_PERIOD}'].iloc[-1].item()
+    df.ta.ema(length=EMA_PERIOD, append=True)
+    latest_ema_5 = df[f'EMA_{EMA_PERIOD}'].iloc[-1].item()
 
     # 3. 14-Day ATR
     atr_col_name = f'ATR_{ATR_PERIOD}'
-    data_daily.ta.atr(length=ATR_PERIOD, append=True)
     
-    # CRITICAL FIX: Robustly access ATR, using forward-fill (ffill) as a fallback
-    if atr_col_name not in data_daily.columns:
-        raise KeyError(f"Failed to calculate or access indicator: '{atr_col_name}'. Column not created.")
+    # pandas-ta can fail here if the installation is bad or data types are subtly wrong,
+    # but since data_daily is confirmed to be float, this should proceed.
+    df.ta.atr(length=ATR_PERIOD, append=True)
+    
+    if atr_col_name not in df.columns:
+        # If the column still isn't created, the installation of pandas-ta is likely broken.
+        raise KeyError(f"Failed to calculate or access indicator: '{atr_col_name}'. Column not created. (Check pandas-ta installation)")
 
-    latest_atr_series = data_daily[atr_col_name]
+    latest_atr_series = df[atr_col_name]
     
-    # Use ffill to get the last valid value, ensuring we don't return NaN even if the last row is missing it.
+    # Use ffill() to get the last valid value, ensuring we don't fail on a trailing NaN.
     latest_atr = latest_atr_series.ffill().iloc[-1].item()
     
-    # Final check to ensure all values are actual numbers
+    # Final check to ensure all values are actual finite numbers
     if not all(np.isfinite([current_sma_200, latest_ema_5, latest_atr])):
         raise ValueError("Indicator calculation resulted in infinite or non-numeric values.")
 
