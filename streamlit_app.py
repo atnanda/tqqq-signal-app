@@ -181,7 +181,7 @@ def generate_signal(indicators):
             final_signal = "**BUY SQQQ**"
             trade_ticker = INVERSE_TICKER
 
-    return final_signal, trade_ticker, conviction_status, vasl_level
+    return final_signal, trade_ticker, conviction_status, vasl_trigger_level
 
 
 # --- Backtesting Engine ---
@@ -257,15 +257,15 @@ class BacktestEngine:
                 # Sell current position for CASH (using today's closing price)
                 if current_ticker != 'CASH':
                     sell_price_col = f'{current_ticker}_close'
-                    # The KeyError occurred here previously if QQQ_close was missing
                     portfolio_value = shares * current_day[sell_price_col] 
                     shares = 0
                 
                 # Buy new position (using today's closing price)
                 if trade_ticker != 'CASH':
                     buy_price_col = f'{trade_ticker}_close'
-                    portfolio_value = shares * current_day[buy_price_col]
                     shares = portfolio_value / current_day[buy_price_col]
+                    # Update value after purchase (shares are held)
+                    portfolio_value = shares * current_day[buy_price_col] 
                 
                 current_ticker = trade_ticker
 
@@ -299,7 +299,7 @@ def run_backtests(full_data, target_date):
     # 'today' is a datetime.date object from the st.date_input
     today = target_date 
     
-    # Calculate start dates (FIXED in previous step: these are now date objects)
+    # Calculate start dates
     start_of_year = datetime(today.year, 1, 1).date()
     three_months_back = (today - timedelta(days=90))
     one_week_back = (today - timedelta(days=7))
@@ -415,7 +415,8 @@ def display_app():
     # 3. Calculate and Generate Signal
     try:
         indicators = calculate_indicators(data_for_indicators, final_signal_price)
-        final_signal, trade_ticker, conviction_status, vasl_level = generate_signal(indicators)
+        # FIX APPLIED HERE: Unpack 'vasl_trigger_level' instead of 'vasl_level'
+        final_signal, trade_ticker, conviction_status, vasl_trigger_level = generate_signal(indicators) 
     except Exception as e:
         st.error(f"FATAL ERROR during indicator calculation or signal generation: {e}")
         st.stop()
@@ -451,15 +452,18 @@ def display_app():
     col_vasl_level.metric("14-Day ATR", f"${indicators['atr']:.2f}")
 
     if "Triggered" in conviction_status:
-        col_vasl_status.error(f"**VASL Trigger Level:** ${vasl_level:.2f}")
+        # Use the correctly unpacked variable here
+        col_vasl_status.error(f"**VASL Trigger Level:** ${vasl_trigger_level:.2f}") 
     else:
-        col_vasl_status.success(f"**VASL Trigger Level:** ${vasl_level:.2f}")
+        # Use the correctly unpacked variable here
+        col_vasl_status.success(f"**VASL Trigger Level:** ${vasl_trigger_level:.2f}")
 
     st.markdown("---")
     
     # --- 6. Display Results: BACKTESTING ---
     st.header("⏱️ Backtest Performance (vs. QQQ Buy & Hold)")
-    st.markdown(f"**Simulation:** \$10,000 initial investment traded based on historical daily signals.")
+    # FIXED SYNTAX WARNING: Removed backslash from $10,000
+    st.markdown(f"**Simulation:** $10,000 initial investment traded based on historical daily signals.")
 
     if backtest_results:
         # Prepare DataFrame for display
