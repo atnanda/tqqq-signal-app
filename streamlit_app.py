@@ -20,7 +20,7 @@ SMA_PERIOD = 200
 if 'override_price' not in st.session_state:
     st.session_state['override_price'] = None
 
-# --- Core Helper Function for Data Fetching and Cleaning (Fixes all yfinance column issues) ---
+# --- Core Helper Function for Data Fetching and Cleaning ---
 
 @st.cache_data(ttl=60*60*4) 
 def fetch_historical_data(target_date):
@@ -85,7 +85,7 @@ def fetch_historical_data(target_date):
         # Only select required columns and ensure they are float after dropping NaNs
         data_for_indicators = daily_data[required_cols].dropna().astype(float)
         
-        # Check for sufficient data (need enough rows for ATR's initial calculations)
+        # Check for sufficient data
         if data_for_indicators.shape[0] < SMA_PERIOD:
             st.error(f"FATAL ERROR: Insufficient clean data ({data_for_indicators.shape[0]} rows) to calculate {SMA_PERIOD}-Day SMA.")
             return pd.DataFrame() 
@@ -97,10 +97,10 @@ def fetch_historical_data(target_date):
         return pd.DataFrame()
 
 
-# --- Calculation and Signal Functions (Fixes ATR access error) ---
+# --- Calculation and Signal Functions (FINAL FIX FOR NaN/ATR) ---
 
 def calculate_indicators(data_daily, current_price):
-    """Calculates all indicators using pandas-ta."""
+    """Calculates all indicators using pandas-ta and handles potential NaN results defensively."""
     
     # 1. 200-Day SMA
     data_daily.ta.sma(length=SMA_PERIOD, append=True)
@@ -112,15 +112,21 @@ def calculate_indicators(data_daily, current_price):
 
     # 3. 14-Day ATR
     atr_col_name = f'ATR_{ATR_PERIOD}'
-    # The calculation needs high, low, close columns to be present and clean
     data_daily.ta.atr(length=ATR_PERIOD, append=True)
     
-    # CRITICAL: Check for the ATR column explicitly after calculation
+    # CRITICAL FIX: Robustly access ATR, using forward-fill (ffill) as a fallback
     if atr_col_name not in data_daily.columns:
-        # This confirms pandas-ta failed to produce the column
-        raise KeyError(f"Failed to calculate or access indicator: '{atr_col_name}'. Check data integrity for ATR.")
+        raise KeyError(f"Failed to calculate or access indicator: '{atr_col_name}'. Column not created.")
 
-    latest_atr = data_daily[atr_col_name].iloc[-1].item()
+    latest_atr_series = data_daily[atr_col_name]
+    
+    # Use ffill to get the last valid value, ensuring we don't return NaN even if the last row is missing it.
+    latest_atr = latest_atr_series.ffill().iloc[-1].item()
+    
+    # Final check to ensure all values are actual numbers
+    if not all(np.isfinite([current_sma_200, latest_ema_5, latest_atr])):
+        raise ValueError("Indicator calculation resulted in infinite or non-numeric values.")
+
 
     return {
         'current_price': current_price,
@@ -230,7 +236,7 @@ def display_app():
         indicators = calculate_indicators(data_for_indicators, final_signal_price)
         final_signal, conviction_status, vasl_level = generate_signal(indicators)
     except Exception as e:
-        # Catch the specific ATR error here for a clean display
+        # Catch the specific error here for a clean display
         st.error(f"FATAL ERROR during indicator calculation or signal generation: {e}")
         st.stop()
 
@@ -273,5 +279,6 @@ def display_app():
 
 if __name__ == "__main__":
     display_app()
+
 
 
