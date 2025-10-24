@@ -23,13 +23,14 @@ INVERSE_TICKER = "SQQQ"
 if 'override_price' not in st.session_state:
     st.session_state['override_price'] = None
 
-# --- Core Helper Function for Data Fetching and Cleaning ---
+# --- Core Helper Function for Data Fetching and Cleaning (FINAL HARDENED FIX) ---
 
 @st.cache_data(ttl=60*60*4) 
 def fetch_historical_data(target_date, lookback_days=400):
     """
-    Fetches historical data for QQQ, TQQQ, and SQQQ, cleans it, and returns a single DataFrame.
-    This version ensures all necessary column formats (simple for indicators, prefixed for backtest) exist.
+    Fetches historical data for QQQ, TQQQ, and SQQQ, and ensures the required 
+    prefixed columns ('QQQ_close', 'TQQQ_close', 'SQQQ_close') and 
+    simple columns ('close', 'high', 'low') are present.
     """
     market_end_date = target_date + timedelta(days=1)
     start_date = target_date - timedelta(days=lookback_days)
@@ -39,7 +40,6 @@ def fetch_historical_data(target_date, lookback_days=400):
     try:
         tickers = [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]
         
-        # Fetch data for all required tickers
         all_data = yf.download(
             tickers, 
             start=start_date, 
@@ -50,40 +50,45 @@ def fetch_historical_data(target_date, lookback_days=400):
             timeout=15 
         )
         
-        if all_data.empty or (isinstance(all_data.columns, pd.MultiIndex) and all_data.columns.empty):
+        if all_data.empty:
             st.error("yfinance returned an empty dataset. Check tickers and date range.")
             return pd.DataFrame()
 
-        # --- 1. Flatten MultiIndex and Create Prefixed Columns (Needed for Backtesting) ---
-        clean_data = {}
-        for metric in ['Open', 'High', 'Low', 'Adj Close', 'Volume']:
-            for ticker in tickers:
-                if (metric, ticker) in all_data.columns:
-                    col_name = f"{ticker}_{metric.lower().replace('adj close', 'close')}"
-                    clean_data[col_name] = all_data[(metric, ticker)].copy()
-
-        df_combined = pd.DataFrame(clean_data)
-        df_combined = df_combined.dropna()
-
-        # --- 2. Create Simple QQQ Columns (Needed for Indicator Calculation) ---
-        # We rename the QQQ prefixed columns to simple names on the combined DataFrame.
-        qqq_cols_map = {}
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            prefixed_col = f'{TICKER}_{col}'
-            if prefixed_col in df_combined.columns:
-                qqq_cols_map[prefixed_col] = col
-
-        df_combined.rename(columns=qqq_cols_map, inplace=True)
+        # --- 1. Flatten MultiIndex and Consolidate Prices ---
+        df_combined = pd.DataFrame(index=all_data.index)
         
-        # --- 3. Final Validation ---
-        required_qqq_cols = ['high', 'low', 'close', 'open', 'volume']
-        missing_qqq_cols = [c for c in required_qqq_cols if c not in df_combined.columns]
+        # Iterate through the required columns and tickers
+        for ticker in tickers:
+            # 1a. Prioritize Adjusted Close as the 'close' price
+            close_col_name = f"{ticker}_close"
+            if ('Adj Close', ticker) in all_data.columns:
+                df_combined[close_col_name] = all_data['Adj Close'][ticker]
+            elif ('Close', ticker) in all_data.columns:
+                # Fallback to non-adjusted Close if Adj Close is missing (rare for QQQ, but safe)
+                df_combined[close_col_name] = all_data['Close'][ticker]
+            
+            # 1b. Get OHLCV data for QQQ (needed for indicator calculation)
+            if ticker == TICKER:
+                for metric in ['Open', 'High', 'Low', 'Volume']:
+                    if (metric, ticker) in all_data.columns:
+                        df_combined[metric.lower()] = all_data[metric][ticker]
         
+        # --- 2. Create Simple QQQ Columns for Indicators ---
+        # The simple 'close' column for QQQ must be explicitly set from the prefixed column.
+        if f'{TICKER}_close' in df_combined.columns:
+            df_combined['close'] = df_combined[f'{TICKER}_close']
+            
+        # --- 3. Final Validation and Cleanup ---
+        
+        # Drop rows with any NaN values in critical columns
+        required_cols = ['high', 'low', 'close', f'{LEVERAGED_TICKER}_close', f'{INVERSE_TICKER}_close']
+        df_combined.dropna(subset=required_cols, inplace=True)
+
+        missing_qqq_cols = [c for c in ['high', 'low', 'close'] if c not in df_combined.columns]
         if missing_qqq_cols:
-             st.error(f"Data cleaning failed: Missing QQQ OHLC columns {missing_qqq_cols} after renaming.")
+             st.error(f"Data cleaning failed: Missing QQQ OHLC columns {missing_qqq_cols}.")
              return pd.DataFrame()
 
-        # Check for sufficient data
         if df_combined.shape[0] < SMA_PERIOD:
             st.error(f"FATAL ERROR: Insufficient clean data ({df_combined.shape[0]} rows) to calculate {SMA_PERIOD}-Day SMA.")
             return pd.DataFrame() 
@@ -176,7 +181,7 @@ def generate_signal(indicators):
             final_signal = "**BUY SQQQ**"
             trade_ticker = INVERSE_TICKER
 
-    return final_signal, trade_ticker, conviction_status, vasl_trigger_level
+    return final_signal, trade_ticker, conviction_status, vasl_level
 
 
 # --- Backtesting Engine ---
@@ -231,6 +236,7 @@ class BacktestEngine:
     def run_simulation(self, start_date):
         """Runs the $10k simulation from the start date to the end of the data."""
         
+        # Filter by date (index.date is used for comparison with the start_date which is a date object)
         sim_df = self.df[self.df.index.date >= start_date].copy()
         
         if sim_df.empty:
@@ -251,12 +257,14 @@ class BacktestEngine:
                 # Sell current position for CASH (using today's closing price)
                 if current_ticker != 'CASH':
                     sell_price_col = f'{current_ticker}_close'
-                    portfolio_value = shares * current_day[sell_price_col]
+                    # The KeyError occurred here previously if QQQ_close was missing
+                    portfolio_value = shares * current_day[sell_price_col] 
                     shares = 0
                 
                 # Buy new position (using today's closing price)
                 if trade_ticker != 'CASH':
                     buy_price_col = f'{trade_ticker}_close'
+                    portfolio_value = shares * current_day[buy_price_col]
                     shares = portfolio_value / current_day[buy_price_col]
                 
                 current_ticker = trade_ticker
@@ -291,7 +299,7 @@ def run_backtests(full_data, target_date):
     # 'today' is a datetime.date object from the st.date_input
     today = target_date 
     
-    # Calculate start dates (FIXED: removed redundant .date() calls after timedelta)
+    # Calculate start dates (FIXED in previous step: these are now date objects)
     start_of_year = datetime(today.year, 1, 1).date()
     three_months_back = (today - timedelta(days=90))
     one_week_back = (today - timedelta(days=7))
@@ -308,12 +316,12 @@ def run_backtests(full_data, target_date):
     
     for label, start_date in timeframes:
         if start_date >= today:
-             results.append({"Timeframe": label, "Start Date": start_date, "Strategy Value": INITIAL_INVESTMENT, "B&H QQQ Value": INITIAL_INVESTMENT, "P/L": 0.0, "B&H P/L": 0.0})
+             results.append({"Timeframe": label, "Start Date": start_of_year, "Strategy Value": INITIAL_INVESTMENT, "B&H QQQ Value": INITIAL_INVESTMENT, "P/L": 0.0, "B&H P/L": 0.0})
              continue
              
         # Find the actual first trading day for the start date
         relevant_dates = signals_df.index[signals_df.index.date >= start_date]
-        first_trade_day = relevant_dates.min().date() if not relevant_dates.empty else None # Get the date part for comparison
+        first_trade_day = relevant_dates.min().date() if not relevant_dates.empty else None
 
         if first_trade_day is None:
             st.warning(f"Skipping {label}: No trading data available on or after {start_date.strftime('%Y-%m-%d')}.")
