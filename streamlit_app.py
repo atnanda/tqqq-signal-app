@@ -398,6 +398,7 @@ def create_chart(df, indicators):
         name='Signal Price'
     ))
 
+    # FIX: Replace use_container_width=True with width='stretch'
     fig.update_layout(
         title=f'{TICKER} - Trading Strategy Indicators (Last ~200 Days)',
         xaxis_title="Date",
@@ -533,7 +534,9 @@ def display_app():
     
     try:
         chart_fig = create_chart(data_with_indicators, indicators)
-        st.plotly_chart(chart_fig, use_container_width=True)
+        # FIX: The old chart function used use_container_width=True.
+        # Replacing the argument in st.plotly_chart:
+        st.plotly_chart(chart_fig, width='stretch')
     except Exception as e:
         st.error(f"Could not generate chart. Error: {e}")
 
@@ -550,7 +553,8 @@ def display_app():
         df_results['B&H QQQ Value'] = df_results['B&H QQQ Value'].map('${:,.2f}'.format)
         
         df_results['P/L'] = df_results['P/L'].map(lambda x: f"{'+' if x >= 0 else ''}${x:,.2f}")
-        df_results['B&H P/L'] = df_results['B/H P/L'].map(lambda x: f"{'+' if x >= 0 else ''}${x:,.2f}")
+        # FIX: Corrected column name access from 'B/H P/L' to 'B&H P/L'
+        df_results['B&H P/L'] = df_results['B&H P/L'].map(lambda x: f"{'+' if x >= 0 else ''}${x:,.2f}")
         
         df_results = df_results.rename(columns={
             "B&H QQQ Value": "B&H Value",
