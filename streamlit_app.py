@@ -154,8 +154,13 @@ def calculate_indicators(data_daily, target_date, current_price):
         'atr': latest_atr
     }, df
 
-def generate_signal(indicators):
-    """Applies the defined trading strategy logic with priority: 1. VASL, 2. DMA, 3. Inverse EMA Exit."""
+def generate_signal(indicators, current_holding_ticker=None):
+    """
+    Applies the refined trading strategy logic: 
+    1. VASL 
+    2. DMA (stricter TQQQ entry) 
+    3. Inverse EMA Exit.
+    """
     price = indicators['current_price']
     sma_200 = indicators['sma_200']
     ema_5 = indicators['ema_5']
@@ -169,15 +174,32 @@ def generate_signal(indicators):
         trade_ticker = 'CASH'
         conviction_status = "VASL Triggered - Move to CASH"
     else:
-        # 2. PRIORITY 2: DMA (Directional Conviction)
-        dma_bull = (price >= sma_200)
+        # 2. PRIORITY 2: DMA (Directional Conviction - with strict TQQQ entry)
+        dma_bull_price = (price >= sma_200)
+        dma_bull_ema = (ema_5 >= sma_200) # EMA CONFIRMATION FILTER
         
-        if dma_bull:
-            # DMA: BULL
-            conviction_status = "DMA - Bull (LONG TQQQ)"
-            final_signal = "**BUY TQQQ**"
-            trade_ticker = LEVERAGED_TICKER
-        else:
+        if dma_bull_price:
+            # Price is Bullish (Above 200-SMA)
+            
+            if dma_bull_ema:
+                # DMA: BULL (Price AND EMA confirm momentum) -> ENTRY/HOLD TQQQ
+                conviction_status = "DMA - Bull (LONG TQQQ confirmed by 5EMA)"
+                final_signal = "**BUY TQQQ**"
+                trade_ticker = LEVERAGED_TICKER
+            else:
+                # DMA: Neutral (Price is bull, but 5EMA is lagging 200SMA)
+                
+                if current_holding_ticker == LEVERAGED_TICKER:
+                    # RETAIN: If already in TQQQ, this condition (EMA lag) is NOT an exit rule.
+                    conviction_status = "DMA - Hold TQQQ (Price Bullish, EMA lagging but not exit condition)"
+                    final_signal = "**HOLD TQQQ**"
+                    trade_ticker = LEVERAGED_TICKER
+                else:
+                    # CASH: If not in TQQQ, the strict entry rule fails.
+                    conviction_status = "DMA - Neutral (TQQQ Entry Filter Failed: 5EMA lagging)"
+                    final_signal = "**CASH (TQQQ Entry Filter Failed)**"
+                    trade_ticker = 'CASH'
+        else: # dma_bull_price is False (Price < 200 SMA)
             # DMA: BEAR - Check PRIORITY 3
             
             # 3. PRIORITY 3: Inverse EMA Exit (Only applies if DMA is BEAR)
@@ -194,7 +216,7 @@ def generate_signal(indicators):
 
     return final_signal, trade_ticker, conviction_status, vasl_trigger_level
 
-# --- Backtesting Engine (REVERTED run_simulation to return 3 items) ---
+# --- Backtesting Engine ---
 
 class BacktestEngine:
     """Runs a backtest simulation for a given historical dataset."""
@@ -203,7 +225,7 @@ class BacktestEngine:
         self.df = historical_data.copy()
         
     def generate_historical_signals(self):
-        """Generates the trading signal and conviction status for every day in the history."""
+        """Generates the trading signal for every day in the history using the refined logic."""
         self.df.ta.sma(length=SMA_PERIOD, append=True)
         self.df.ta.ema(length=EMA_PERIOD, append=True)
         self.df['ATR'] = calculate_true_range_and_atr(self.df, ATR_PERIOD)
@@ -212,6 +234,8 @@ class BacktestEngine:
         if self.df.empty: return pd.DataFrame()
 
         signals = []
+        current_ticker_historical = 'CASH' # Track position dynamically for historical look-back
+
         for index, row in self.df.iterrows():
             ema_5 = row[f'EMA_{EMA_PERIOD}']
             sma_200 = row[f'SMA_{SMA_PERIOD}']
@@ -223,27 +247,32 @@ class BacktestEngine:
             if price < vasl_trigger_level:
                 trade_ticker = 'CASH'
             else:
-                # 2. PRIORITY 2: DMA
-                dma_bull = (price >= sma_200)
+                # 2. PRIORITY 2: DMA (MODIFIED ENTRY)
+                dma_bull_price = (price >= sma_200)
+                dma_bull_ema = (ema_5 >= sma_200) 
                 
-                if dma_bull:
-                    # DMA: BULL
-                    trade_ticker = LEVERAGED_TICKER
-                else:
+                if dma_bull_price:
+                    if dma_bull_ema:
+                        # TQQQ ENTRY/HOLD
+                        trade_ticker = LEVERAGED_TICKER
+                    else:
+                        # EMA LAGGING: If already in TQQQ, HOLD. Otherwise, CASH (Entry Filter Fails).
+                        trade_ticker = LEVERAGED_TICKER if current_ticker_historical == LEVERAGED_TICKER else 'CASH'
+                else: # dma_bull_price is False (Price < 200 SMA)
                     # DMA: BEAR - Check PRIORITY 3
                     
                     # 3. PRIORITY 3: Inverse EMA Exit
                     if price > ema_5:
                         trade_ticker = 'CASH' 
                     else:
-                        # Default BEAR signal
                         trade_ticker = INVERSE_TICKER 
+            
             signals.append(trade_ticker)
+            current_ticker_historical = trade_ticker # Update holding for the next day's check
 
         self.df['Trade_Ticker'] = signals
         return self.df
         
-    # REVERTED: run_simulation now returns 3 values (final_value, buy_and_hold, trade_history_df)
     def run_simulation(self, start_date):
         """Runs the $10k simulation and logs all trades."""
         sim_df = self.df[self.df.index.date >= start_date].copy()
@@ -270,44 +299,51 @@ class BacktestEngine:
                 
                 # A. SELL (Exit Current Position)
                 if current_ticker != 'CASH':
-                    sell_price = current_day_prices[current_ticker]
+                    # Only sell if the new signal is different or CASH, unless the new signal is TQQQ and we are in TQQQ (in which case, the logic should have kept us there)
                     
-                    # Convert shares back to realized cash
-                    realized_cash = shares * sell_price
-                    
-                    # Log the SELL trade.
-                    trade_history.append({
-                        'Date': current_day.name.date(), 
-                        'Action': f"SELL {current_ticker}", 
-                        'Asset': current_ticker, 
-                        'Price': float(sell_price), 
-                        'Portfolio Value': float(realized_cash) 
-                    })
-                    
-                    # Update portfolio state to CASH.
-                    portfolio_value = realized_cash
-                    shares = Decimal("0")
-
+                    # If we are holding TQQQ and the new signal is CASH/SQQQ, or we are holding SQQQ and the new signal is CASH/TQQQ:
+                    if trade_ticker != current_ticker: 
+                        sell_price = current_day_prices[current_ticker]
+                        
+                        # Convert shares back to realized cash
+                        realized_cash = shares * sell_price
+                        
+                        # Log the SELL trade.
+                        trade_history.append({
+                            'Date': current_day.name.date(), 
+                            'Action': f"SELL {current_ticker}", 
+                            'Asset': current_ticker, 
+                            'Price': float(sell_price), 
+                            'Portfolio Value': float(realized_cash) 
+                        })
+                        
+                        # Update portfolio state to CASH.
+                        portfolio_value = realized_cash
+                        shares = Decimal("0")
+                
                 # B. BUY (Enter New Position)
                 if trade_ticker != 'CASH':
-                    buy_price = current_day_prices[trade_ticker]
                     
-                    if buy_price > 0:
-                        # Use the entire CASH amount (portfolio_value) to buy shares
-                        shares = portfolio_value / buy_price
-                    else:
-                        shares = Decimal("0")
-                        portfolio_value = Decimal("0")
+                    # Only buy if we weren't already holding the asset (prevents double logging)
+                    if trade_ticker != current_ticker:
+                        buy_price = current_day_prices[trade_ticker]
                         
-                    # Log the BUY trade.
-                    trade_history.append({
-                        'Date': current_day.name.date(), 
-                        'Action': f"BUY {trade_ticker}", 
-                        'Asset': trade_ticker, 
-                        'Price': float(buy_price), 
-                        'Portfolio Value': float(portfolio_value)
-                    })
-                    
+                        if buy_price > 0:
+                            # Use the entire CASH amount (portfolio_value) to buy shares
+                            shares = portfolio_value / buy_price
+                        else:
+                            shares = Decimal("0")
+                            portfolio_value = Decimal("0")
+                            
+                        # Log the BUY trade.
+                        trade_history.append({
+                            'Date': current_day.name.date(), 
+                            'Action': f"BUY {trade_ticker}", 
+                            'Asset': trade_ticker, 
+                            'Price': float(buy_price), 
+                            'Portfolio Value': float(portfolio_value)
+                        })
+                        
                 current_ticker = trade_ticker
 
             # --- 2. TRACKING: UPDATE PORTFOLIO VALUE FOR THE CURRENT DAY'S CLOSE ---
@@ -316,7 +352,7 @@ class BacktestEngine:
                 # Update the portfolio value based on the current close price (unrealized P/L)
                 portfolio_value = shares * current_price
             
-            # Log the daily portfolio value (No longer needed to be returned, but kept here for logic flow)
+            # Log the daily portfolio value
             sim_df.loc[current_day.name, 'Portfolio_Value'] = float(portfolio_value) 
 
         # --- FIX: Add final row to trade history for current holding value ---
@@ -341,7 +377,6 @@ class BacktestEngine:
 
         return float(portfolio_value), buy_and_hold_qqq, pd.DataFrame(trade_history)
 
-# REVERTED: run_backtests now returns 2 items (results, trade_history_df)
 def run_backtests(full_data, target_date):
     """Defines timeframes and runs the backtesting engine."""
     
@@ -386,7 +421,6 @@ def run_backtests(full_data, target_date):
         signal_row_index = signals_df.index[signals_df.index.date >= first_trade_day].min()
         initial_trade = signals_df.loc[signal_row_index, 'Trade_Ticker'] if not pd.isna(signal_row_index) else "N/A"
         
-        # REVERTED: run_simulation now returns 3 values
         final_value, buy_and_hold_qqq, trade_history_df = backtester.run_simulation(first_trade_day)
 
         if label == "Signal Date to Today":
@@ -433,7 +467,7 @@ def run_backtests(full_data, target_date):
         
     return results, trade_history_for_signal_date
 
-# --- Plotly Charting Function (REVERTED to single-axis) ---
+# --- Plotly Charting Function ---
 
 def calculate_true_range_and_atr_for_chart(df, atr_period):
     """Re-implemented helper for chart logic, which uses float math."""
@@ -446,7 +480,6 @@ def calculate_true_range_and_atr_for_chart(df, atr_period):
     
     return atr_series 
 
-# REVERTED: Chart is now single-axis, plotting QQQ price and indicators only.
 def create_chart(df, indicators):
     """Creates a Plotly candlestick chart with indicators and date markers."""
     
@@ -516,7 +549,7 @@ def display_app():
     
     st.set_page_config(page_title="TQQQ/SQQQ Signal", layout="wide")
     st.title("📈 TQQQ/SQQQ Daily Signal Generator & Full History Backtester")
-    st.markdown("Strategy priority: **1. VASL** (Volatility Stop-Loss) $\implies$ **2. DMA** (Directional Conviction) $\implies$ **3. Inverse EMA Exit** (Bearish Position Stop).")
+    st.markdown("Strategy priority: **1. VASL** $\implies$ **2. DMA** (TQQQ entry requires **5EMA $\ge$ 200SMA**) $\implies$ **3. Inverse EMA Exit**.")
     st.markdown("---")
 
     # 1. Data Fetch 
@@ -581,6 +614,7 @@ def display_app():
     # 3. Calculate and Generate Signal
     try:
         indicators, data_with_indicators = calculate_indicators(data_for_backtest, target_date, final_signal_price)
+        # For the final signal, we assume we are not holding anything if testing an arbitrary date
         final_signal, trade_ticker, conviction_status, vasl_trigger_level = generate_signal(indicators) 
     except ValueError as e: 
         st.error(f"FATAL ERROR: {e}")
@@ -589,7 +623,7 @@ def display_app():
         st.error(f"FATAL ERROR during indicator calculation or signal generation: {e}")
         st.stop()
 
-    # 4. Run Backtests (REVERTED to return 2 DataFrames)
+    # 4. Run Backtests
     backtest_results, trade_history_df = run_backtests(data_for_backtest, target_date)
     
     # ... (Display Signal and Metrics) ...
@@ -616,7 +650,7 @@ def display_app():
 
     st.markdown("---")
     
-    # --- 6. Display Results: INTERACTIVE CHART (REVERTED) ---
+    # --- 6. Display Results: INTERACTIVE CHART ---
     st.header("📈 Interactive Indicator Chart")
     
     # Fetch 400 days to ensure 200-day SMA is calculated for the visible 200-day range
@@ -651,7 +685,7 @@ def display_app():
     
     # --- 7. Display Results: AGGREGATE BACKTESTING ---
     st.header("⏱️ Backtest Performance (vs. QQQ Buy & Hold)")
-    st.markdown(f"**Simulation:** ${float(INITIAL_INVESTMENT):,.2f} initial investment traded based on historical daily signals.")
+    st.markdown(f"**Simulation:** ${float(INITIAL_INVESTMENT):,.2f} initial investment traded based on historical daily signals (Refined 5EMA confirmation for TQQQ entry only).")
 
     if backtest_results:
         df_results = pd.DataFrame(backtest_results)
