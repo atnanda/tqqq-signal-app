@@ -783,7 +783,3 @@ def display_app():
 
 if __name__ == "__main__":
     display_app()
-
-st.markdown("You can learn more about how to use **Pandas TA** for technical analysis in Python with this video: [Pandas TA: A complete Guide](https://www.youtube.com/watch?v=W_kKPp9LEFY).")
-This video provides a complete guide on the `pandas-ta` library, which is the core tool used in the script to calculate the SMA, EMA, and ATR indicators.
-http://googleusercontent.com/youtube_content/1
