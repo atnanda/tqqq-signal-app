@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import warnings
 import streamlit as st
 import numpy as np
-import plotly.graph_objects as go # New import for charting
+import plotly.graph_objects as go 
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -82,10 +82,10 @@ def fetch_historical_data(target_date, lookback_days=400):
         st.error(f"FATAL ERROR during data download: {e}")
         return pd.DataFrame()
 
-# --- Manual ATR Calculation ---
+# --- Manual ATR Calculation (Returns the full series) ---
 
 def calculate_true_range_and_atr(df, atr_period):
-    """Calculates True Range and Average True Range using native Pandas/Numpy."""
+    """Calculates True Range and Average True Range series using native Pandas/Numpy."""
     
     high_minus_low = df['high'] - df['low']
     high_minus_prev_close = np.abs(df['high'] - df['close'].shift(1))
@@ -95,20 +95,13 @@ def calculate_true_range_and_atr(df, atr_period):
                                'hpc': high_minus_prev_close, 
                                'lpc': low_minus_prev_close}).max(axis=1)
     
+    # Use EWM (Exponential Weighted Moving Average) for ATR calculation
     atr_series = true_range.ewm(span=atr_period, adjust=False, min_periods=atr_period).mean()
     
-    latest_atr = atr_series.ffill().iloc[-1]
+    # Return the full series
+    return atr_series 
 
-    if pd.isna(latest_atr) or not np.isfinite(latest_atr):
-        # Fallback to the last valid value if the very last one is NaN
-        latest_atr = atr_series.ffill().iloc[-2]
-
-    if pd.isna(latest_atr) or not np.isfinite(latest_atr):
-        raise ValueError("Manual ATR calculation failed to yield a finite value.")
-            
-    return latest_atr
-
-# --- Calculation and Signal Functions ---
+# --- Calculation and Signal Functions (Uses ATR series and extracts latest safely) ---
 
 def calculate_indicators(data_daily, current_price):
     """Calculates all indicators using pandas-ta for SMA/EMA and manual calculation for ATR."""
@@ -123,9 +116,19 @@ def calculate_indicators(data_daily, current_price):
     df.ta.ema(length=EMA_PERIOD, append=True)
     latest_ema_5 = df[f'EMA_{EMA_PERIOD}'].iloc[-1]
 
-    # 3. 14-Day ATR
-    latest_atr = calculate_true_range_and_atr(df, ATR_PERIOD)
+    # 3. 14-Day ATR (Calculate the full series and attach it to the DataFrame)
+    df['ATR'] = calculate_true_range_and_atr(df, ATR_PERIOD)
     
+    # Safely get the latest ATR value, ensuring it's finite
+    latest_atr = df['ATR'].ffill().iloc[-1]
+    
+    if pd.isna(latest_atr) or not np.isfinite(latest_atr):
+        # Fallback to the last available finite value if the most recent day is incomplete
+        if len(df['ATR'].ffill()) >= 2:
+            latest_atr = df['ATR'].ffill().iloc[-2]
+        else:
+            raise ValueError("ATR calculation failed to yield a finite value after two attempts.")
+
     # Final check and conversion
     current_sma_200 = current_sma_200.item() if hasattr(current_sma_200, 'item') else current_sma_200
     latest_ema_5 = latest_ema_5.item() if hasattr(latest_ema_5, 'item') else latest_ema_5
@@ -133,7 +136,7 @@ def calculate_indicators(data_daily, current_price):
     if not all(np.isfinite([current_sma_200, latest_ema_5, latest_atr])):
         raise ValueError("Indicator calculation resulted in infinite or non-numeric values.")
 
-    # Return the full DataFrame along with indicators for charting later
+    # Attach VASL level to the DataFrame for plotting
     df['VASL_Level'] = df[f'EMA_{EMA_PERIOD}'] - (ATR_MULTIPLIER * df['ATR'])
     
     return {
@@ -250,13 +253,12 @@ class BacktestEngine:
                 # Buy new position
                 if trade_ticker != 'CASH':
                     buy_price_col = f'{trade_ticker}_close'
-                    # Handle division by zero for safety, although unlikely with Adjusted Close
                     if current_day[buy_price_col] > 0:
                         shares = portfolio_value / current_day[buy_price_col]
                         portfolio_value = shares * current_day[buy_price_col]
                     else:
                         shares = 0
-                        portfolio_value = 0 # Safety kill if price is zero
+                        portfolio_value = 0 
                 
                 current_ticker = trade_ticker
 
@@ -337,10 +339,7 @@ def run_backtests(full_data, target_date):
 def create_chart(df, indicators):
     """Creates a Plotly candlestick chart with indicators (SMA, EMA, VASL)."""
     
-    # Ensure the required indicator columns are present (SMA_200, EMA_5, VASL_Level)
-    ema_col = f'EMA_{EMA_PERIOD}'
-    
-    # We use a 200-day subset for clarity, but need enough data for the indicators to plot cleanly
+    # We use a 200-day subset for clarity
     df_plot = df.iloc[-200:].copy() 
     
     fig = go.Figure(data=[
@@ -367,7 +366,7 @@ def create_chart(df, indicators):
     # 5-Day EMA
     fig.add_trace(go.Scatter(
         x=df_plot.index, 
-        y=df_plot[ema_col], 
+        y=df_plot[f'EMA_{EMA_PERIOD}'], 
         mode='lines', 
         name=f'{EMA_PERIOD}-Day EMA',
         line=dict(color='orange', width=1)
@@ -410,7 +409,7 @@ def create_chart(df, indicators):
 def get_most_recent_trading_day():
     today = datetime.today().date()
     target_date = today
-    while target_date.weekday() > 4: # 5=Saturday, 6=Sunday
+    while target_date.weekday() > 4: 
         target_date -= timedelta(days=1)
     return target_date
 
@@ -534,7 +533,7 @@ def display_app():
         chart_fig = create_chart(data_with_indicators, indicators)
         st.plotly_chart(chart_fig, use_container_width=True)
     except Exception as e:
-        st.error(f"Could not generate chart. Please check indicator calculations. Error: {e}")
+        st.error(f"Could not generate chart. Error: {e}")
 
     st.markdown("---")
         
