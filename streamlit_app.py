@@ -6,7 +6,7 @@ import warnings
 import streamlit as st
 import numpy as np
 import plotly.graph_objects as go 
-import pytz # NEW: Import for timezone handling
+import pytz 
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -25,7 +25,7 @@ INVERSE_TICKER = "SQQQ"
 if 'override_price' not in st.session_state:
     st.session_state['override_price'] = None
 
-# --- Timezone-Aware Date Function (Updated for California Time) ---
+# --- Timezone-Aware Date Function ---
 
 def get_most_recent_trading_day():
     """
@@ -39,8 +39,7 @@ def get_most_recent_trading_day():
     # 2. Get the current California time
     now_ca = datetime.now(california_tz)
     
-    # 3. Define market close time (4:00 PM PT for US markets)
-    # We use 4:30 PM (16:30) to be safely after the close and reporting.
+    # 3. Define market close time (4:30 PM PT)
     market_close_hour = 16
     market_close_minute = 30
     
@@ -64,8 +63,7 @@ def get_most_recent_trading_day():
 @st.cache_data(ttl=60*60*4) 
 def fetch_historical_data(target_date, lookback_days=400):
     """
-    Fetches historical data for QQQ, TQQQ, and SQQQ, and ensures the required 
-    prefixed columns and simple columns ('close', 'high', 'low') are present.
+    Fetches historical data for QQQ, TQQQ, and SQQQ.
     """
     market_end_date = target_date + timedelta(days=1) 
     start_date = target_date - timedelta(days=lookback_days)
@@ -130,16 +128,14 @@ def calculate_true_range_and_atr(df, atr_period):
                                'hpc': high_minus_prev_close, 
                                'lpc': low_minus_prev_close}).max(axis=1)
     
-    # Use EWM (Exponential Weighted Moving Average) for ATR calculation
     atr_series = true_range.ewm(span=atr_period, adjust=False, min_periods=atr_period).mean()
     
-    # Return the full series
     return atr_series 
 
-# --- Calculation and Signal Functions (Uses ATR series and extracts latest safely) ---
+# --- Calculation and Signal Functions ---
 
 def calculate_indicators(data_daily, current_price):
-    """Calculates all indicators using pandas-ta for SMA/EMA and manual calculation for ATR."""
+    """Calculates all indicators."""
     
     df = data_daily.copy() 
     
@@ -151,14 +147,13 @@ def calculate_indicators(data_daily, current_price):
     df.ta.ema(length=EMA_PERIOD, append=True)
     latest_ema_5 = df[f'EMA_{EMA_PERIOD}'].iloc[-1]
 
-    # 3. 14-Day ATR (Calculate the full series and attach it to the DataFrame)
+    # 3. 14-Day ATR 
     df['ATR'] = calculate_true_range_and_atr(df, ATR_PERIOD)
     
     # Safely get the latest ATR value, ensuring it's finite
     latest_atr = df['ATR'].ffill().iloc[-1]
     
     if pd.isna(latest_atr) or not np.isfinite(latest_atr):
-        # Fallback to the last available finite value if the most recent day is incomplete
         if len(df['ATR'].ffill()) >= 2:
             latest_atr = df['ATR'].ffill().iloc[-2]
         else:
@@ -221,24 +216,20 @@ class BacktestEngine:
     def generate_historical_signals(self):
         """Generates the trading signal and conviction status for every day in the history."""
         
-        # 1. Calculate SMA and EMA (once)
         self.df.ta.sma(length=SMA_PERIOD, append=True)
         self.df.ta.ema(length=EMA_PERIOD, append=True)
         
-        # 2. Manually calculate ATR 
         high_minus_low = self.df['high'] - self.df['low']
         high_minus_prev_close = np.abs(self.df['high'] - self.df['close'].shift(1))
         low_minus_prev_close = np.abs(self.df['low'] - self.df['close'].shift(1))
         true_range = pd.DataFrame({'hl': high_minus_low, 'hpc': high_minus_prev_close, 'lpc': low_minus_prev_close}).max(axis=1)
         self.df['ATR'] = true_range.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean()
         
-        # Drop initial NaNs created by indicators.
         self.df.dropna(subset=[f'SMA_{SMA_PERIOD}', f'EMA_{EMA_PERIOD}', 'ATR'], inplace=True)
 
         if self.df.empty:
             return pd.DataFrame()
 
-        # 3. Apply the trading logic row by row
         signals = []
         for index, row in self.df.iterrows():
             ema_5 = row[f'EMA_{EMA_PERIOD}']
@@ -272,20 +263,16 @@ class BacktestEngine:
         shares = 0
         current_ticker = 'CASH'
 
-        # Loop through trading days
         for i in range(len(sim_df)):
             current_day = sim_df.iloc[i]
             trade_ticker = current_day['Trade_Ticker']
             
-            # --- 1. Rebalance (Sell Old, Buy New) ---
             if trade_ticker != current_ticker:
-                # Sell current position for CASH
                 if current_ticker != 'CASH':
                     sell_price_col = f'{current_ticker}_close'
                     portfolio_value = shares * current_day[sell_price_col] 
                     shares = 0
                 
-                # Buy new position
                 if trade_ticker != 'CASH':
                     buy_price_col = f'{trade_ticker}_close'
                     if current_day[buy_price_col] > 0:
@@ -297,16 +284,12 @@ class BacktestEngine:
                 
                 current_ticker = trade_ticker
 
-            # --- 2. Track Value ---
             if shares > 0:
                 current_price_col = f'{current_ticker}_close'
                 portfolio_value = shares * current_day[current_price_col]
             
-            # The backtest must run on the full dataframe to prevent SettingWithCopyWarning
-            # but for simplicity in this Streamlit context, we use .loc on the filtered copy
             sim_df.loc[current_day.name, 'Portfolio_Value'] = portfolio_value 
 
-        # Calculate final buy-and-hold value for comparison
         qqq_close_col = f'{TICKER}_close'
         qqq_start_price = sim_df.iloc[0][qqq_close_col]
         qqq_end_price = sim_df.iloc[-1][qqq_close_col]
@@ -376,11 +359,9 @@ def run_backtests(full_data, target_date):
 def create_chart(df, indicators):
     """Creates a Plotly candlestick chart with indicators (SMA, EMA, VASL)."""
     
-    # We use a 200-day subset for clarity
     df_plot = df.iloc[-200:].copy() 
     
     fig = go.Figure(data=[
-        # Candlestick
         go.Candlestick(
             x=df_plot.index,
             open=df_plot['open'],
@@ -391,7 +372,6 @@ def create_chart(df, indicators):
         )
     ])
 
-    # 200-Day SMA
     fig.add_trace(go.Scatter(
         x=df_plot.index, 
         y=df_plot[f'SMA_{SMA_PERIOD}'], 
@@ -400,7 +380,6 @@ def create_chart(df, indicators):
         line=dict(color='blue', width=2)
     ))
 
-    # 5-Day EMA
     fig.add_trace(go.Scatter(
         x=df_plot.index, 
         y=df_plot[f'EMA_{EMA_PERIOD}'], 
@@ -409,7 +388,6 @@ def create_chart(df, indicators):
         line=dict(color='orange', width=1)
     ))
 
-    # VASL Line
     fig.add_trace(go.Scatter(
         x=df_plot.index, 
         y=df_plot['VASL_Level'], 
@@ -418,7 +396,6 @@ def create_chart(df, indicators):
         line=dict(color='red', width=1, dash='dot')
     ))
 
-    # Add marker for current price
     current_price = indicators['current_price']
     last_date = df_plot.index[-1]
     
@@ -429,7 +406,6 @@ def create_chart(df, indicators):
         name='Signal Price'
     ))
 
-    # Layout styling
     fig.update_layout(
         title=f'{TICKER} - Trading Strategy Indicators (Last ~200 Days)',
         xaxis_title="Date",
@@ -455,7 +431,6 @@ def display_app():
         st.header("1. Target Date & Price")
         
         default_date = get_most_recent_trading_day()
-        st.info(f"Date is calculated based on **{default_date.strftime('%A, %B %d, %Y')}** (Pacific Time Market Close).") # Show PT calculation status
         
         target_date = st.date_input(
             "Select Signal Date",
@@ -490,6 +465,10 @@ def display_app():
 
     # --- Main Logic ---
 
+    # 0. DYNAMIC DATE DISPLAY: This now uses the selected target_date
+    st.info(f"Analysis running for market close data on **{target_date.strftime('%A, %B %d, %Y')}**.")
+    st.markdown("---")
+    
     # 1. Data Fetch
     data_for_indicators = fetch_historical_data(target_date, lookback_days=400)
 
@@ -527,7 +506,7 @@ def display_app():
     
     # --- 5. Display Results: CURRENT SIGNAL ---
     
-    st.header(f"Today's Signal based on {TICKER} Price at: {target_date.strftime('%Y-%m-%d')}")
+    st.header(f"Daily Signal: {target_date.strftime('%Y-%m-%d')}")
     
     if "BUY TQQQ" in final_signal:
         st.success(f"## {final_signal}")
