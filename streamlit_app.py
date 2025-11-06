@@ -140,6 +140,7 @@ def calculate_true_range_and_atr(df, atr_period):
 def calculate_indicators(data_daily, target_date, current_price):
     """Calculates all indicators using data only up to target_date."""
     
+    # Filter to only use data up to the target_date for indicator calculation
     df = data_daily[data_daily.index.date <= target_date].copy() 
     
     if df.empty:
@@ -321,14 +322,14 @@ def run_backtests(full_data, target_date):
         ("YTD (Since First Valid Signal)", ytd_start_date),
         ("3 Months Back", three_months_back),
         ("1 Week Back", one_week_back),
-        # This will now run from the user's selected date (target_date) to the end of the data (last_signal_date)
+        # This runs from the user's selected date (target_date) to the end of the data (last_signal_date)
         ("Signal Date to Today", target_date), 
     ]
     
     results = []
     
     for label, start_date in timeframes:
-        # For past dates, if the start date is later than the last data point, skip.
+        # For long-term backtests, ensure start date doesn't exceed the last available data day
         if start_date > last_signal_date and label != "Signal Date to Today":
             continue
             
@@ -336,9 +337,9 @@ def run_backtests(full_data, target_date):
         first_trade_day = relevant_dates.min().date() if not relevant_dates.empty else None
 
         if first_trade_day is None:
-            # For the "Signal Date to Today" entry, if the start date is outside the data range, use the max available.
             if label == "Signal Date to Today" and start_date <= last_signal_date:
-                first_trade_day = start_date
+                # Use the target_date if it's within the data range but no trade day is found immediately
+                first_trade_day = start_date 
             else:
                 st.warning(f"Skipping {label}: No trading data available on or after {start_date.strftime('%Y-%m-%d')}.")
                 continue
@@ -377,6 +378,7 @@ def create_chart(df, indicators):
         )
     ])
 
+    # These columns exist because we pass the DataFrame returned by calculate_indicators
     fig.add_trace(go.Scatter(
         x=df_plot.index, 
         y=df_plot[f'SMA_{SMA_PERIOD}'], 
@@ -484,13 +486,12 @@ def display_app():
     final_signal_price = st.session_state['override_price']
     qqq_close_col_name = f'{TICKER}_close'
     
-    # Filter data to calculate indicators and get the signal price only up to the target_date
-    data_for_indicators = data_for_backtest[data_for_backtest.index.date <= target_date].copy()
-    
     if final_signal_price is None:
         try:
+            # Filter data to get the signal price only up to the target_date
+            data_for_signal_price = data_for_backtest[data_for_backtest.index.date <= target_date].copy()
             # Use the close price of the *last day in the filtered set*
-            final_signal_price = data_for_indicators[qqq_close_col_name].iloc[-1].item()
+            final_signal_price = data_for_signal_price[qqq_close_col_name].iloc[-1].item()
         
         except Exception as e:
             st.error(f"FATAL ERROR: Could not find the Adjusted Close price for the target date. Error: {e}")
@@ -498,7 +499,7 @@ def display_app():
 
     # 3. Calculate and Generate Signal
     try:
-        # Pass the filtered data set
+        # Pass the full data set to calculate_indicators (it filters internally)
         indicators, data_with_indicators = calculate_indicators(data_for_backtest, target_date, final_signal_price)
         final_signal, trade_ticker, conviction_status, vasl_trigger_level = generate_signal(indicators) 
     except Exception as e:
@@ -545,8 +546,9 @@ def display_app():
     st.header("📈 Interactive Indicator Chart")
     
     try:
-        # Pass the filtered data set for charting
-        chart_fig = create_chart(data_for_indicators, indicators) 
+        # FIX: Pass the DataFrame that was returned by calculate_indicators (data_with_indicators)
+        chart_fig = create_chart(data_with_indicators, indicators) 
+        # FIX: Replaced use_container_width=True with width='stretch'
         st.plotly_chart(chart_fig, width='stretch')
     except Exception as e:
         st.error(f"Could not generate chart. Error: {e}")
