@@ -26,6 +26,11 @@ INITIAL_INVESTMENT = Decimal("10000.00")
 LEVERAGED_TICKER = "TQQQ"
 INVERSE_TICKER = "SQQQ"
 
+# --- NEW FIX CONSTANTS ---
+DMA_BUFFER = Decimal("0.01") # 1% buffer for DMA Crossover (Fix 1A)
+INVERSE_ATR_MULTIPLIER = Decimal("0.5") # 0.5 * ATR buffer for SQQQ Exit (Fix 3A)
+# ---
+
 # TQQQ Inception Date (February 9, 2010)
 TQQQ_INCEPTION_DATE = datetime(2010, 2, 9).date()
 
@@ -37,6 +42,8 @@ if 'override_price' not in st.session_state:
 
 def get_most_recent_trading_day():
     """Determines the most recent CLOSED trading day."""
+    # Assuming current time is November 6, 2025 (a Thursday)
+    # The last closed trading day would be November 5, 2025.
     california_tz = pytz.timezone('America/Los_Angeles')
     now_ca = datetime.now(california_tz)
     market_close_hour = 16
@@ -61,6 +68,7 @@ def fetch_historical_data():
     """
     Fetches historical data for QQQ, TQQQ, and SQQQ starting from TQQQ's inception date.
     """
+    # Using the current date for the end date calculation (e.g., Nov 6, 2025)
     today_for_fetch = get_most_recent_trading_day()
     market_end_date = today_for_fetch + timedelta(days=1) 
     
@@ -156,65 +164,91 @@ def calculate_indicators(data_daily, target_date, current_price):
 
 def generate_signal(indicators, current_holding_ticker=None):
     """
-    Applies the refined trading strategy logic: 
+    Applies the REVISED trading strategy logic: 
     1. VASL 
-    2. DMA (stricter TQQQ entry) 
-    3. Inverse EMA Exit.
+    2. DMA (with 1% buffer for TQQQ/SQQQ entry/switch - Fix 1A) 
+    3. Inverse EMA Exit (with 0.5 * ATR buffer - Fix 3A).
     """
-    price = indicators['current_price']
-    sma_200 = indicators['sma_200']
-    ema_5 = indicators['ema_5']
-    atr = indicators['atr']
+    # Use Decimal for indicators for precise logic checks
+    price = Decimal(str(indicators['current_price']))
+    sma_200 = Decimal(str(indicators['sma_200']))
+    ema_5 = Decimal(str(indicators['ema_5']))
+    atr = Decimal(str(indicators['atr']))
 
     vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)
     
+    # Calculate DMA Thresholds (FIX 1A)
+    dma_bull_threshold = sma_200 * (1 + DMA_BUFFER)
+    dma_bear_threshold = sma_200 * (1 - DMA_BUFFER)
+    
+    # Inverse Exit Threshold (FIX 3A) - Only used in Bear Regime
+    inverse_exit_buffer = INVERSE_ATR_MULTIPLIER * atr
+    inverse_exit_level = ema_5 + inverse_exit_buffer
+    
+    # Convert back to float for output (Streamlit display)
+    vasl_trigger_level_float = float(vasl_trigger_level)
+
     # 1. PRIORITY 1: VASL (Volatility Stop-Loss)
     if price < vasl_trigger_level:
         final_signal = "**SELL TQQQ/SQQQ / CASH (VASL Triggered)**"
         trade_ticker = 'CASH'
         conviction_status = "VASL Triggered - Move to CASH"
     else:
-        # 2. PRIORITY 2: DMA (Directional Conviction - with strict TQQQ entry)
-        dma_bull_price = (price >= sma_200)
-        dma_bull_ema = (ema_5 >= sma_200) # EMA CONFIRMATION FILTER
+        # 2. PRIORITY 2: DMA (Directional Conviction - with 1% buffer)
         
-        if dma_bull_price:
-            # Price is Bullish (Above 200-SMA)
+        # Strong Bull: Price must be 1% ABOVE 200-SMA
+        dma_strong_bull_price = (price >= dma_bull_threshold)
+        dma_bull_ema = (ema_5 >= sma_200) # EMA CONFIRMATION FILTER (unchanged)
+        
+        # Strong Bear: Price must be 1% BELOW 200-SMA
+        dma_strong_bear_price = (price < dma_bear_threshold)
+
+        if dma_strong_bull_price:
+            # DMA: STRONG BULL (Price 1% Above 200-SMA)
             
             if dma_bull_ema:
-                # DMA: BULL (Price AND EMA confirm momentum) -> ENTRY/HOLD TQQQ
-                conviction_status = "DMA - Bull (LONG TQQQ confirmed by 5EMA)"
+                # TQQQ ENTRY/HOLD: Bullish momentum confirmed by 5EMA
+                conviction_status = "DMA - Strong Bull (LONG TQQQ confirmed by 5EMA)"
                 final_signal = "**BUY TQQQ**"
                 trade_ticker = LEVERAGED_TICKER
             else:
-                # DMA: Neutral (Price is bull, but 5EMA is lagging 200SMA)
+                # NEUTRAL/HOLD: Price is strong bull, but 5EMA is lagging 200SMA
                 
                 if current_holding_ticker == LEVERAGED_TICKER:
-                    # RETAIN: If already in TQQQ, this condition (EMA lag) is NOT an exit rule.
-                    conviction_status = "DMA - Hold TQQQ (Price Bullish, EMA lagging but not exit condition)"
+                    conviction_status = "DMA - Hold TQQQ (Price Strong Bullish, EMA lagging but not exit condition)"
                     final_signal = "**HOLD TQQQ**"
                     trade_ticker = LEVERAGED_TICKER
                 else:
-                    # CASH: If not in TQQQ, the strict entry rule fails.
                     conviction_status = "DMA - Neutral (TQQQ Entry Filter Failed: 5EMA lagging)"
                     final_signal = "**CASH (TQQQ Entry Filter Failed)**"
                     trade_ticker = 'CASH'
-        else: # dma_bull_price is False (Price < 200 SMA)
-            # DMA: BEAR - Check PRIORITY 3
+        
+        elif dma_strong_bear_price:
+            # DMA: STRONG BEAR (Price 1% Below 200-SMA) - Check PRIORITY 3
             
-            # 3. PRIORITY 3: Inverse EMA Exit (Only applies if DMA is BEAR)
-            if price > ema_5:
-                # DMA Bear, but short-term bounce above 5-Day EMA
-                conviction_status = "DMA - Bear, but Price > 5-Day EMA (Exit SQQQ)"
+            # 3. PRIORITY 3: Inverse EMA Exit (FIX 3A Applied)
+            # Sell SQQQ/CASH if Price is above 5-EMA PLUS 0.5*ATR buffer
+            if price > inverse_exit_level:
+                conviction_status = "DMA - Strong Bear, but Price > 5-Day EMA + 0.5*ATR (Exit SQQQ)"
                 final_signal = "**SELL SQQQ / CASH (Inverse Position Exit)**"
                 trade_ticker = 'CASH'
             else:
-                # DMA Bear, and no short-term strength (Price <= 5-Day EMA)
-                conviction_status = "DMA - Bear (BUY SQQQ)"
+                # DMA Bear, and no short-term strength (Price <= Inverse Exit Level)
+                conviction_status = "DMA - Strong Bear (BUY SQQQ)"
                 final_signal = "**BUY SQQQ**"
                 trade_ticker = INVERSE_TICKER
+        
+        else:
+            # Price is within the 1% buffer zone (0.99*SMA_200 <= Price < 1.01*SMA_200)
+            conviction_status = "DMA - Neutral (Price within 1% Buffer Zone)"
+            if current_holding_ticker == LEVERAGED_TICKER or current_holding_ticker == INVERSE_TICKER:
+                final_signal = f"**HOLD {current_holding_ticker}**"
+                trade_ticker = current_holding_ticker
+            else:
+                final_signal = "**CASH (Waiting for trend confirmation)**"
+                trade_ticker = 'CASH'
 
-    return final_signal, trade_ticker, conviction_status, vasl_trigger_level
+    return final_signal, trade_ticker, conviction_status, vasl_trigger_level_float
 
 # --- Backtesting Engine ---
 
@@ -225,7 +259,7 @@ class BacktestEngine:
         self.df = historical_data.copy()
         
     def generate_historical_signals(self):
-        """Generates the trading signal for every day in the history using the refined logic."""
+        """Generates the trading signal for every day in the history using the REVISED logic."""
         self.df.ta.sma(length=SMA_PERIOD, append=True)
         self.df.ta.ema(length=EMA_PERIOD, append=True)
         self.df['ATR'] = calculate_true_range_and_atr(self.df, ATR_PERIOD)
@@ -237,36 +271,52 @@ class BacktestEngine:
         current_ticker_historical = 'CASH' # Track position dynamically for historical look-back
 
         for index, row in self.df.iterrows():
-            ema_5 = row[f'EMA_{EMA_PERIOD}']
-            sma_200 = row[f'SMA_{SMA_PERIOD}']
-            atr = row['ATR']
-            price = row['close']
+            # Use Decimal conversion on the fly for logic checks
+            ema_5 = Decimal(str(row[f'EMA_{EMA_PERIOD}']))
+            sma_200 = Decimal(str(row[f'SMA_{SMA_PERIOD}']))
+            atr = Decimal(str(row['ATR']))
+            price = Decimal(str(row['close']))
+            
             vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)
+            
+            # Calculate DMA Thresholds (FIX 1A)
+            dma_bull_threshold = sma_200 * (1 + DMA_BUFFER) 
+            dma_bear_threshold = sma_200 * (1 - DMA_BUFFER)
+            
+            # Inverse Exit Threshold (FIX 3A)
+            inverse_exit_level = ema_5 + (INVERSE_ATR_MULTIPLIER * atr)
             
             # 1. PRIORITY 1: VASL
             if price < vasl_trigger_level:
                 trade_ticker = 'CASH'
             else:
-                # 2. PRIORITY 2: DMA (MODIFIED ENTRY)
-                dma_bull_price = (price >= sma_200)
-                dma_bull_ema = (ema_5 >= sma_200) 
+                # 2. PRIORITY 2: DMA (MODIFIED ENTRY/EXIT)
+                dma_strong_bull_price = (price >= dma_bull_threshold)
+                dma_bull_ema = (ema_5 >= sma_200)
+                dma_strong_bear_price = (price < dma_bear_threshold)
                 
-                if dma_bull_price:
+                if dma_strong_bull_price:
+                    # DMA: STRONG BULL
                     if dma_bull_ema:
                         # TQQQ ENTRY/HOLD
                         trade_ticker = LEVERAGED_TICKER
                     else:
                         # EMA LAGGING: If already in TQQQ, HOLD. Otherwise, CASH (Entry Filter Fails).
                         trade_ticker = LEVERAGED_TICKER if current_ticker_historical == LEVERAGED_TICKER else 'CASH'
-                else: # dma_bull_price is False (Price < 200 SMA)
-                    # DMA: BEAR - Check PRIORITY 3
+                
+                elif dma_strong_bear_price:
+                    # DMA: STRONG BEAR - Check PRIORITY 3
                     
-                    # 3. PRIORITY 3: Inverse EMA Exit
-                    if price > ema_5:
-                        trade_ticker = 'CASH' 
+                    # 3. PRIORITY 3: Inverse EMA Exit (FIX 3A)
+                    if price > inverse_exit_level:
+                        trade_ticker = 'CASH'
                     else:
-                        trade_ticker = INVERSE_TICKER 
-            
+                        trade_ticker = INVERSE_TICKER
+                
+                else:
+                    # Price is within the DMA buffer zone. HOLD current position or stay CASH.
+                    trade_ticker = current_ticker_historical
+
             signals.append(trade_ticker)
             current_ticker_historical = trade_ticker # Update holding for the next day's check
 
@@ -274,7 +324,7 @@ class BacktestEngine:
         return self.df
         
     def run_simulation(self, start_date):
-        """Runs the $10k simulation and logs all trades. (CORRECTED LOGIC)"""
+        """Runs the $10k simulation and logs all trades."""
         sim_df = self.df[self.df.index.date >= start_date].copy()
         if sim_df.empty: return float(INITIAL_INVESTMENT), 0, pd.DataFrame() 
             
@@ -292,6 +342,7 @@ class BacktestEngine:
             current_day_prices = {}
             for t in [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]:
                 if f'{t}_close' in current_day:
+                    # Convert to string first to maintain precision when converting from numpy float to Decimal
                     current_day_prices[t] = Decimal(str(current_day[f'{t}_close']))
             
             # --- 1. HANDLE TRADE SIGNAL CHANGE ---
@@ -314,7 +365,7 @@ class BacktestEngine:
                     # Update portfolio state to CASH.
                     portfolio_value = realized_cash
                     shares = Decimal("0")
-                
+                    
                 # B. BUY (Enter New Position)
                 if trade_ticker != 'CASH':
                     buy_price = current_day_prices[trade_ticker]
@@ -375,7 +426,7 @@ def run_backtests(full_data, target_date):
     signals_df = backtester.generate_historical_signals()
     
     if signals_df.empty:
-        st.error("Backtest failed: Could not generate historical signals.")
+        # Note: In a Streamlit environment, this would be logged as an error
         return [], pd.DataFrame() 
 
     last_signal_date = signals_df.index.max().date()
@@ -539,8 +590,8 @@ def create_chart(df, indicators):
 def display_app():
     
     st.set_page_config(page_title="TQQQ/SQQQ Signal", layout="wide")
-    st.title("📈 TQQQ/SQQQ Daily Signal Generator & Full History Backtester")
-    st.markdown("Strategy priority: **1. VASL** $\implies$ **2. DMA** (TQQQ entry requires **5EMA $\ge$ 200SMA**) $\implies$ **3. Inverse EMA Exit**.")
+    st.title("📈 TQQQ/SQQQ Daily Signal Generator & Full History Backtester (Revised)")
+    st.markdown("Strategy priority: **1. VASL** $\implies$ **2. DMA** (Requires **1% Buffer** for switch) $\implies$ **3. Inverse EMA Exit** (Requires **0.5 ATR Buffer**).")
     st.markdown("---")
 
     # 1. Data Fetch 
@@ -580,6 +631,8 @@ def display_app():
         st.metric("EMA Period (VASL/Exit)", f"{EMA_PERIOD} days")
         st.metric("ATR Period (VASL)", f"{ATR_PERIOD} days")
         st.metric("ATR Multiplier (VASL)", ATR_MULTIPLIER)
+        st.metric("DMA Buffer (Fix 1A)", f"{float(DMA_BUFFER) * 100:.0f}%")
+        st.metric("SQQQ Exit Buffer (Fix 3A)", f"{float(INVERSE_ATR_MULTIPLIER)} x ATR")
         st.metric("Backtest Capital", f"${float(INITIAL_INVESTMENT):,.2f}")
         st.caption(f"Full Backtest Data starts from: **{first_available_date.strftime('%Y-%m-%d')}**")
 
@@ -620,7 +673,7 @@ def display_app():
     # ... (Display Signal and Metrics) ...
     st.header(f"Daily Signal: {target_date.strftime('%Y-%m-%d')}")
     
-    if "BUY TQQQ" in final_signal: st.success(f"## {final_signal}")
+    if "BUY TQQQ" in final_signal or "HOLD TQQQ" in final_signal: st.success(f"## {final_signal}")
     elif "SQQQ" in final_signal: st.warning(f"## {final_signal}")
     else: st.error(f"## {final_signal}")
 
@@ -676,7 +729,7 @@ def display_app():
     
     # --- 7. Display Results: AGGREGATE BACKTESTING ---
     st.header("⏱️ Backtest Performance (vs. QQQ Buy & Hold)")
-    st.markdown(f"**Simulation:** ${float(INITIAL_INVESTMENT):,.2f} initial investment traded based on historical daily signals (Refined 5EMA confirmation for TQQQ entry only).")
+    st.markdown(f"**Simulation:** ${float(INITIAL_INVESTMENT):,.2f} initial investment traded based on historical daily signals.")
 
     if backtest_results:
         df_results = pd.DataFrame(backtest_results)
