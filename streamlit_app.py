@@ -349,7 +349,7 @@ def run_backtests(full_data, target_date):
     
     if signals_df.empty:
         st.error("Backtest failed: Could not generate historical signals.")
-        return [], pd.DataFrame(), pd.DataFrame() # 🚨 ADDED: Return empty DataFrame for daily sim data
+        return [], pd.DataFrame(), pd.DataFrame() 
 
     last_signal_date = signals_df.index.max().date()
     # Use the earliest date where indicators are valid for 'Full History' backtest
@@ -370,7 +370,7 @@ def run_backtests(full_data, target_date):
     
     results = []
     trade_history_for_signal_date = pd.DataFrame() 
-    daily_sim_data_for_chart = pd.DataFrame() # 🚨 Initialized
+    daily_sim_data_for_chart = pd.DataFrame() 
     
     for label, start_date in timeframes:
         if start_date > last_signal_date and label != "Signal Date to Today": continue
@@ -448,7 +448,7 @@ def calculate_true_range_and_atr_for_chart(df, atr_period):
     
     return atr_series 
 
-# 🚨 UPDATED: Chart now handles Strategy Index and secondary Y-axis
+# 🚨 CORRECTED FONT PROPERTIES IN LAYOUT
 def create_chart(df, indicators):
     """Creates a Plotly candlestick chart with indicators, markers, and portfolio index line."""
     
@@ -528,7 +528,7 @@ def create_chart(df, indicators):
         # Primary Y-axis config
         yaxis=dict(
             title='Price (USD)', 
-            titlefont=dict(color='white'),
+            title_font=dict(color='white'), # CORRECTED: Changed 'titlefont' to 'title_font'
             tickfont=dict(color='white'),
             side='left',
         )
@@ -541,7 +541,7 @@ def create_chart(df, indicators):
             overlaying='y',
             side='right',
             showgrid=False,
-            titlefont=dict(color='yellowgreen'),
+            title_font=dict(color='yellowgreen'), # CORRECTED: Changed 'titlefont' to 'title_font'
             tickfont=dict(color='yellowgreen'),
             tickformat='.2f' # Format index to 2 decimal places
         )
