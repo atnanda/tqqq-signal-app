@@ -63,6 +63,7 @@ def fetch_historical_data():
     
     FIX 1A (Data Prep): Now fetches Open price for all tickers for realistic execution.
     FIX 3A (Data Prep): Ensures use of Adj Close/Close for indicator calculation.
+    FIX: Ensures 'open' column is present for charting.
     """
     today_for_fetch = get_most_recent_trading_day()
     market_end_date = today_for_fetch + timedelta(days=1) 
@@ -96,16 +97,21 @@ def fetch_historical_data():
             if ('Open', ticker) in all_data.columns:
                  df_combined[f'{ticker}_open'] = all_data['Open'][ticker]
                 
-            # Get QQQ high/low for ATR calculation
+            # Get QQQ high/low/open for ATR/Charting
             if ticker == TICKER:
-                for metric in ['High', 'Low', 'Volume']:
+                for metric in ['High', 'Low', 'Volume', 'Open']: # <-- Added 'Open' here
                     if (metric, ticker) in all_data.columns:
-                        df_combined[metric.lower()] = all_data[metric][ticker]
-        
+                        df_combined[metric.lower()] = all_data[metric][ticker] # <-- Creates 'high', 'low', 'open'
+
+        # Map QQQ columns to generic names required by functions like calculate_indicators & create_chart
         if f'{TICKER}_close' in df_combined.columns:
             df_combined['close'] = df_combined[f'{TICKER}_close']
+        
+        # FIX: Ensure 'open' column is present for charting
+        if f'{TICKER}_open' in df_combined.columns:
+            df_combined['open'] = df_combined[f'{TICKER}_open']
             
-        required_cols = ['high', 'low', 'close', 
+        required_cols = ['open', 'high', 'low', 'close', # <-- 'open' added to required check
                          f'{LEVERAGED_TICKER}_close', f'{INVERSE_TICKER}_close',
                          f'{TICKER}_open', f'{LEVERAGED_TICKER}_open', f'{INVERSE_TICKER}_open']
                          
@@ -524,6 +530,7 @@ def create_chart(df, indicators):
     
     df_plot = df.copy() 
     
+    # FIX: 'open' column is now guaranteed to be present for QQQ
     fig = go.Figure(data=[
         go.Candlestick(x=df_plot.index, open=df_plot['open'], high=df_plot['high'], low=df_plot['low'], close=df_plot['close'], name=TICKER)
     ])
@@ -707,7 +714,7 @@ def display_app():
         chart_data['VASL_Level'] = chart_data[f'EMA_{EMA_PERIOD}'] - (ATR_MULTIPLIER * chart_data['ATR'])
         
         # Only display the last 200 trading days
-        chart_data = chart_data.iloc[-200:].dropna(subset=[f'SMA_{SMA_PERIOD}'])
+        chart_data = chart_data.iloc[-200:].dropna(subset=[f'SMA_{SMA_PERIOD}', 'open']) # <-- Added 'open' check
 
         chart_indicators = {
             'signal_date': target_date,
@@ -776,3 +783,7 @@ def display_app():
 
 if __name__ == "__main__":
     display_app()
+
+st.markdown("You can learn more about how to use **Pandas TA** for technical analysis in Python with this video: [Pandas TA: A complete Guide](https://www.youtube.com/watch?v=W_kKPp9LEFY).")
+This video provides a complete guide on the `pandas-ta` library, which is the core tool used in the script to calculate the SMA, EMA, and ATR indicators.
+http://googleusercontent.com/youtube_content/1
