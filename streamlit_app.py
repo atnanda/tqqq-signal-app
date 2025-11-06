@@ -10,7 +10,7 @@ import pytz
 from decimal import Decimal, getcontext
 
 # Set precision for Decimal operations to high value (e.g., 50 places)
-getcontext().prec = 50 
+getcontext().prec = 50
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -155,7 +155,7 @@ def calculate_indicators(data_daily, target_date, current_price):
     }, df
 
 def generate_signal(indicators):
-    """Applies the defined trading strategy logic: VASL and DMA."""
+    """Applies the defined trading strategy logic with priority: 1. VASL, 2. DMA, 3. Inverse EMA Exit."""
     price = indicators['current_price']
     sma_200 = indicators['sma_200']
     ema_5 = indicators['ema_5']
@@ -163,21 +163,34 @@ def generate_signal(indicators):
 
     vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)
     
+    # 1. PRIORITY 1: VASL (Volatility Stop-Loss)
     if price < vasl_trigger_level:
-        final_signal = "**SELL TQQQ / CASH (Exit)**"
+        final_signal = "**SELL TQQQ/SQQQ / CASH (VASL Triggered)**"
         trade_ticker = 'CASH'
         conviction_status = "VASL Triggered - Move to CASH"
     else:
+        # 2. PRIORITY 2: DMA (Directional Conviction)
         dma_bull = (price >= sma_200)
         
         if dma_bull:
+            # DMA: BULL
             conviction_status = "DMA - Bull (LONG TQQQ)"
             final_signal = "**BUY TQQQ**"
             trade_ticker = LEVERAGED_TICKER
         else:
-            conviction_status = "DMA - Bear (BUY SQQQ)"
-            final_signal = "**BUY SQQQ**"
-            trade_ticker = INVERSE_TICKER
+            # DMA: BEAR - Check PRIORITY 3
+            
+            # 3. PRIORITY 3: Inverse EMA Exit (Only applies if DMA is BEAR)
+            if price > ema_5:
+                # DMA Bear, but short-term bounce above 5-Day EMA
+                conviction_status = "DMA - Bear, but Price > 5-Day EMA (Exit SQQQ)"
+                final_signal = "**SELL SQQQ / CASH (Inverse Position Exit)**"
+                trade_ticker = 'CASH'
+            else:
+                # DMA Bear, and no short-term strength (Price <= 5-Day EMA)
+                conviction_status = "DMA - Bear (BUY SQQQ)"
+                final_signal = "**BUY SQQQ**"
+                trade_ticker = INVERSE_TICKER
 
     return final_signal, trade_ticker, conviction_status, vasl_trigger_level
 
@@ -206,11 +219,25 @@ class BacktestEngine:
             price = row['close']
             vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)
             
+            # 1. PRIORITY 1: VASL
             if price < vasl_trigger_level:
                 trade_ticker = 'CASH'
             else:
+                # 2. PRIORITY 2: DMA
                 dma_bull = (price >= sma_200)
-                trade_ticker = LEVERAGED_TICKER if dma_bull else INVERSE_TICKER
+                
+                if dma_bull:
+                    # DMA: BULL
+                    trade_ticker = LEVERAGED_TICKER
+                else:
+                    # DMA: BEAR - Check PRIORITY 3
+                    
+                    # 3. PRIORITY 3: Inverse EMA Exit
+                    if price > ema_5:
+                        trade_ticker = 'CASH' 
+                    else:
+                        # Default BEAR signal
+                        trade_ticker = INVERSE_TICKER 
             signals.append(trade_ticker)
 
         self.df['Trade_Ticker'] = signals
@@ -221,7 +248,7 @@ class BacktestEngine:
         sim_df = self.df[self.df.index.date >= start_date].copy()
         if sim_df.empty: return float(INITIAL_INVESTMENT), 0, pd.DataFrame() 
             
-        # 🚨 FIX: Initialize with Decimal
+        # Initialize with Decimal
         portfolio_value = INITIAL_INVESTMENT 
         shares = Decimal("0")
         current_ticker = 'CASH'
@@ -253,7 +280,7 @@ class BacktestEngine:
                         'Action': f"SELL {current_ticker}", 
                         'Asset': current_ticker, 
                         'Price': float(sell_price), 
-                        'Portfolio Value': float(realized_cash) # Log as float for Streamlit display
+                        'Portfolio Value': float(realized_cash) 
                     })
                     
                     # Update portfolio state to CASH.
@@ -267,7 +294,6 @@ class BacktestEngine:
                     if buy_price > 0:
                         # Use the entire CASH amount (portfolio_value) to buy shares
                         shares = portfolio_value / buy_price
-                        # portfolio_value remains the same amount, but is now invested value.
                     else:
                         shares = Decimal("0")
                         portfolio_value = Decimal("0")
@@ -320,7 +346,7 @@ def run_backtests(full_data, target_date):
     one_week_back = (last_signal_date - timedelta(days=7))
 
     timeframes = [
-        ("Full History", start_of_tradable_data), # New Full History option
+        ("Full History", start_of_tradable_data), 
         ("YTD (Since First Valid Signal)", ytd_start_date),
         ("3 Months Back", three_months_back),
         ("1 Week Back", one_week_back),
@@ -344,7 +370,7 @@ def run_backtests(full_data, target_date):
         signal_row_index = signals_df.index[signals_df.index.date >= first_trade_day].min()
         initial_trade = signals_df.loc[signal_row_index, 'Trade_Ticker'] if not pd.isna(signal_row_index) else "N/A"
         
-        # 🚨 Pass the Decimal version of INITIAL_INVESTMENT as a float for the metric calculations
+        # Pass the Decimal version of INITIAL_INVESTMENT as a float for the metric calculations
         final_value, buy_and_hold_qqq, trade_history_df = backtester.run_simulation(first_trade_day)
 
         if label == "Signal Date to Today":
@@ -448,7 +474,7 @@ def display_app():
     
     st.set_page_config(page_title="TQQQ/SQQQ Signal", layout="wide")
     st.title("📈 TQQQ/SQQQ Daily Signal Generator & Full History Backtester")
-    st.markdown("Strategy based on **200-Day SMA** (Conviction) and **5-Day EMA/14-Day ATR** (Volatility Stop-Loss).")
+    st.markdown("Strategy priority: **1. VASL** (Volatility Stop-Loss) $\implies$ **2. DMA** (Directional Conviction) $\implies$ **3. Inverse EMA Exit** (Bearish Position Stop).")
     st.markdown("---")
 
     # 1. Data Fetch 
@@ -485,7 +511,7 @@ def display_app():
         st.header("2. Strategy Parameters")
         st.metric("Ticker", TICKER)
         st.metric("SMA Period (DMA)", f"{SMA_PERIOD} days")
-        st.metric("EMA Period (VASL)", f"{EMA_PERIOD} days")
+        st.metric("EMA Period (VASL/Exit)", f"{EMA_PERIOD} days")
         st.metric("ATR Period (VASL)", f"{ATR_PERIOD} days")
         st.metric("ATR Multiplier (VASL)", ATR_MULTIPLIER)
         st.metric("Backtest Capital", f"${float(INITIAL_INVESTMENT):,.2f}")
@@ -528,7 +554,7 @@ def display_app():
     st.header(f"Daily Signal: {target_date.strftime('%Y-%m-%d')}")
     
     if "BUY TQQQ" in final_signal: st.success(f"## {final_signal}")
-    elif "BUY SQQQ" in final_signal: st.warning(f"## {final_signal}")
+    elif "SQQQ" in final_signal: st.warning(f"## {final_signal}")
     else: st.error(f"## {final_signal}")
 
     st.markdown("---")
@@ -543,7 +569,7 @@ def display_app():
     col_vasl_level.metric("5-Day EMA", f"${indicators['ema_5']:.2f}")
     col_vasl_level.metric("14-Day ATR", f"${indicators['atr']:.2f}")
     
-    level_format = col_vasl_status.error if "Triggered" in conviction_status else col_vasl_status.success
+    level_format = col_vasl_status.error if "VASL Triggered" in conviction_status else col_vasl_status.success
     level_format(f"**VASL Trigger Level:** ${vasl_trigger_level:.2f}")
 
     st.markdown("---")
@@ -603,7 +629,7 @@ def display_app():
         trade_history_df['Portfolio Value'] = trade_history_df['Portfolio Value'].map('${:,.2f}'.format)
         
         st.dataframe(trade_history_df, 
-            column_config={"Date": st.column_config.DatetimeColumn("Date", format="YYYY-MM-DD"), "Action": st.column_config.Column("Action", help="Trade action", width="small"), "Asset": st.column_config.Column("Asset", help="Asset involved", width="small")},
+            column_config={"Date": st.column_config.DatetimeColumn("Date", format="YYYY-MM-DD"), "Action": st.column_config.Column("Action", help="Trade action", width="small"), "Asset": st.column_config.Column("Asset", width="small")},
             hide_index=True)
             
         st.caption("This table logs every time the strategy transitions to a new position.")
