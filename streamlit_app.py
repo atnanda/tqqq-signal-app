@@ -49,7 +49,6 @@ def get_most_recent_trading_day():
     cutoff_time = now_ca.replace(hour=market_close_hour, minute=market_close_minute, second=0, microsecond=0)
     
     if now_ca < cutoff_time:
-        # If the time is before 4:30 PM PT, the signal is based on the *previous* day's close.
         target_date -= timedelta(days=1)
 
     # 4. Handle Weekends: Wind back to the previous Friday if needed
@@ -139,18 +138,14 @@ def calculate_indicators(data_daily, current_price):
     
     df = data_daily.copy() 
     
-    # 1. 200-Day SMA
     df.ta.sma(length=SMA_PERIOD, append=True)
     current_sma_200 = df[f'SMA_{SMA_PERIOD}'].iloc[-1]
     
-    # 2. 5-Day EMA
     df.ta.ema(length=EMA_PERIOD, append=True)
     latest_ema_5 = df[f'EMA_{EMA_PERIOD}'].iloc[-1]
 
-    # 3. 14-Day ATR 
     df['ATR'] = calculate_true_range_and_atr(df, ATR_PERIOD)
     
-    # Safely get the latest ATR value, ensuring it's finite
     latest_atr = df['ATR'].ffill().iloc[-1]
     
     if pd.isna(latest_atr) or not np.isfinite(latest_atr):
@@ -159,14 +154,12 @@ def calculate_indicators(data_daily, current_price):
         else:
             raise ValueError("ATR calculation failed to yield a finite value after two attempts.")
 
-    # Final check and conversion
     current_sma_200 = current_sma_200.item() if hasattr(current_sma_200, 'item') else current_sma_200
     latest_ema_5 = latest_ema_5.item() if hasattr(latest_ema_5, 'item') else latest_ema_5
 
     if not all(np.isfinite([current_sma_200, latest_ema_5, latest_atr])):
         raise ValueError("Indicator calculation resulted in infinite or non-numeric values.")
 
-    # Attach VASL level to the DataFrame for plotting
     df['VASL_Level'] = df[f'EMA_{EMA_PERIOD}'] - (ATR_MULTIPLIER * df['ATR'])
     
     return {
@@ -183,7 +176,6 @@ def generate_signal(indicators):
     ema_5 = indicators['ema_5']
     atr = indicators['atr']
 
-    # --- 1. Volatility Stop-Loss (VASL) ---
     vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)
     
     if price < vasl_trigger_level:
@@ -191,7 +183,6 @@ def generate_signal(indicators):
         trade_ticker = 'CASH'
         conviction_status = "VASL Triggered - Move to CASH"
     else:
-        # --- 2. Conviction Filter (DMA) ---
         dma_bull = (price >= sma_200)
         
         if dma_bull:
@@ -315,26 +306,27 @@ def run_backtests(full_data, target_date):
     
     three_months_back = (today - timedelta(days=90))
     one_week_back = (today - timedelta(days=7))
-    one_day_back = (today - timedelta(days=1))
 
     timeframes = [
         ("YTD (Since First Valid Signal)", ytd_start_date),
         ("3 Months Back", three_months_back),
         ("1 Week Back", one_week_back),
-        ("1 Day Back", one_day_back),
+        ("Signal Date", today), # NEW ENTRY
     ]
     
     results = []
     
     for label, start_date in timeframes:
-        if start_date >= today:
-            results.append({"Timeframe": label, "Start Date": start_of_year.strftime('%Y-%m-%d'), "Strategy Value": INITIAL_INVESTMENT, "B&H QQQ Value": INITIAL_INVESTMENT, "P/L": 0.0, "B&H P/L": 0.0})
+        if start_date > today:
             continue
             
         relevant_dates = signals_df.index[signals_df.index.date >= start_date]
         first_trade_day = relevant_dates.min().date() if not relevant_dates.empty else None
 
-        if first_trade_day is None:
+        # Ensure "Signal Date" runs even if only the current day is available
+        if first_trade_day is None and label == "Signal Date":
+             first_trade_day = today
+        elif first_trade_day is None:
             st.warning(f"Skipping {label}: No trading data available on or after {start_date.strftime('%Y-%m-%d')}.")
             continue
             
@@ -465,7 +457,6 @@ def display_app():
 
     # --- Main Logic ---
 
-    # 0. DYNAMIC DATE DISPLAY: This now uses the selected target_date
     st.info(f"Analysis running for market close data on **{target_date.strftime('%A, %B %d, %Y')}**.")
     st.markdown("---")
     
@@ -559,7 +550,7 @@ def display_app():
         df_results['B&H QQQ Value'] = df_results['B&H QQQ Value'].map('${:,.2f}'.format)
         
         df_results['P/L'] = df_results['P/L'].map(lambda x: f"{'+' if x >= 0 else ''}${x:,.2f}")
-        df_results['B&H P/L'] = df_results['B&H P/L'].map(lambda x: f"{'+' if x >= 0 else ''}${x:,.2f}")
+        df_results['B&H P/L'] = df_results['B/H P/L'].map(lambda x: f"{'+' if x >= 0 else ''}${x:,.2f}")
         
         df_results = df_results.rename(columns={
             "B&H QQQ Value": "B&H Value",
