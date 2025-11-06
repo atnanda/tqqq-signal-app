@@ -1,12 +1,12 @@
 import pandas as pd
 import yfinance as yf
-import pandas_ta as pta 
+import pandas_ta as pta
 from datetime import datetime, timedelta
 import warnings
 import streamlit as st
 import numpy as np
-import plotly.graph_objects as go 
-import pytz 
+import plotly.graph_objects as go
+import pytz
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -97,7 +97,7 @@ def fetch_historical_data():
             
         required_cols = ['high', 'low', 'close', f'{LEVERAGED_TICKER}_close', f'{INVERSE_TICKER}_close']
         df_combined.dropna(subset=required_cols, inplace=True)
-            
+        
         return df_combined 
 
     except Exception as e:
@@ -178,7 +178,7 @@ def generate_signal(indicators):
 
     return final_signal, trade_ticker, conviction_status, vasl_trigger_level
 
-# --- Backtesting Engine (UNCHANGED) ---
+# --- Backtesting Engine (FIXED) ---
 
 class BacktestEngine:
     """Runs a backtest simulation for a given historical dataset."""
@@ -231,6 +231,7 @@ class BacktestEngine:
             current_day = sim_df.iloc[i]
             trade_ticker = current_day['Trade_Ticker']
             
+            # Check for trade signal change
             if trade_ticker != current_ticker:
                 
                 # 1. Handle SELL (Exit Current Position)
@@ -238,8 +239,20 @@ class BacktestEngine:
                     sell_price_col = f'{current_ticker}_close'
                     sell_price = current_day[sell_price_col]
                     
-                    trade_history.append({'Date': current_day.name.date(), 'Action': f"SELL {current_ticker}", 'Asset': current_ticker, 'Price': sell_price, 'Portfolio Value': portfolio_value})
-                    portfolio_value = shares * sell_price 
+                    # 🚨 FIX 1: Calculate the realized cash (the new portfolio_value)
+                    realized_cash = shares * sell_price
+                    
+                    # 🚨 FIX 2: Log the SELL trade using the realized cash value
+                    trade_history.append({
+                        'Date': current_day.name.date(), 
+                        'Action': f"SELL {current_ticker}", 
+                        'Asset': current_ticker, 
+                        'Price': sell_price, 
+                        'Portfolio Value': realized_cash # Log the cash received
+                    })
+                    
+                    # Update portfolio state
+                    portfolio_value = realized_cash
                     shares = 0
 
                 # 2. Handle BUY (Enter New Position)
@@ -249,20 +262,28 @@ class BacktestEngine:
                     
                     if buy_price > 0:
                         shares = portfolio_value / buy_price
-                        portfolio_value = shares * buy_price
+                        # portfolio_value remains the same, but now represents the value of shares
                     else:
                         shares = 0
-                        portfolio_value = 0 
+                        portfolio_value = 0 # Loss due to zero price
                     
-                    trade_history.append({'Date': current_day.name.date(), 'Action': f"BUY {trade_ticker}", 'Asset': trade_ticker, 'Price': buy_price, 'Portfolio Value': portfolio_value})
-                
+                    # 🚨 FIX 3: Log the BUY trade using the cash value (which is now invested)
+                    trade_history.append({
+                        'Date': current_day.name.date(), 
+                        'Action': f"BUY {trade_ticker}", 
+                        'Asset': trade_ticker, 
+                        'Price': buy_price, 
+                        'Portfolio Value': portfolio_value # Log the amount invested
+                    })
+                    
                 current_ticker = trade_ticker
 
-            # Update portfolio value for tracking
+            # Update portfolio value for tracking (unrealized value)
             if shares > 0:
                 current_price_col = f'{current_ticker}_close'
                 portfolio_value = shares * current_day[current_price_col]
-            
+            # Else: portfolio_value is the CASH amount if shares == 0
+
             sim_df.loc[current_day.name, 'Portfolio_Value'] = portfolio_value 
 
         # Final B&H calculation
@@ -305,7 +326,7 @@ def run_backtests(full_data, target_date):
     
     for label, start_date in timeframes:
         if start_date > last_signal_date and label != "Signal Date to Today": continue
-            
+        
         relevant_dates = signals_df.index[signals_df.index.date >= start_date]
         first_trade_day = relevant_dates.min().date() if not relevant_dates.empty else None
 
@@ -439,7 +460,7 @@ def display_app():
         if st.button("Clear Data Cache & Rerun", help="Forces a fresh download."):
             st.cache_data.clear()
             st.rerun()
-        
+            
         st.header("2. Strategy Parameters")
         st.metric("Ticker", TICKER)
         st.metric("SMA Period (DMA)", f"{SMA_PERIOD} days")
@@ -523,7 +544,7 @@ def display_app():
             'signal_price': final_signal_price,
             'final_price': data_for_backtest['close'].iloc[-1] # The price for the very last day
         }
-    
+        
         try:
             chart_fig = create_chart(chart_data, chart_indicators) 
             st.plotly_chart(chart_fig, width='stretch')
