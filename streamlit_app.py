@@ -108,10 +108,8 @@ def fetch_historical_data(lookback_days=400):
         df_combined.dropna(subset=required_cols, inplace=True)
 
         if df_combined.shape[0] < SMA_PERIOD:
-            # This is a general error, but calculation itself will handle it better below
             st.warning(f"Warning: Data only has {df_combined.shape[0]} rows. May not be enough for a full {SMA_PERIOD}-Day SMA.")
             
-        # Return the full dataset up to the most recent trading day
         return df_combined 
 
     except Exception as e:
@@ -439,16 +437,25 @@ def display_app():
     st.markdown("Strategy based on **200-Day SMA** (Conviction) and **5-Day EMA/14-Day ATR** (Volatility Stop-Loss).")
     st.markdown("---")
 
+    # 1. Data Fetch - Now fetches up to the most recent trading day
+    data_for_backtest = fetch_historical_data(lookback_days=400)
+
+    if data_for_backtest.empty:
+        st.error("FATAL ERROR: Signal calculation aborted due to insufficient or missing data.")
+        st.stop()
+        
+    # Determine the latest available trading date from the fetched data
+    latest_available_date = data_for_backtest.index.max().date()
+
     # --- Sidebar for Inputs ---
     with st.sidebar:
         st.header("1. Target Date & Price")
         
-        default_date = get_most_recent_trading_day()
-        
+        # Use the latest available date as the default and maximum value (THE FIX)
         target_date = st.date_input(
             "Select Signal Date",
-            value=default_date,
-            max_value=default_date
+            value=latest_available_date,
+            max_value=latest_available_date # Limits selection to the available data range
         )
         
         if target_date.weekday() > 4:
@@ -481,13 +488,6 @@ def display_app():
     st.info(f"Analysis running for market close data on **{target_date.strftime('%A, %B %d, %Y')}**.")
     st.markdown("---")
     
-    # 1. Data Fetch - Now fetches up to the most recent trading day
-    data_for_backtest = fetch_historical_data(lookback_days=400)
-
-    if data_for_backtest.empty:
-        st.error("FATAL ERROR: Signal calculation aborted due to insufficient or missing data.")
-        st.stop()
-
     # 2. Determine Final Signal Price (using data only up to target_date)
     final_signal_price = st.session_state['override_price']
     qqq_close_col_name = f'{TICKER}_close'
