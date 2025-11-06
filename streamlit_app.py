@@ -274,7 +274,7 @@ class BacktestEngine:
         return self.df
         
     def run_simulation(self, start_date):
-        """Runs the $10k simulation and logs all trades."""
+        """Runs the $10k simulation and logs all trades. (CORRECTED LOGIC)"""
         sim_df = self.df[self.df.index.date >= start_date].copy()
         if sim_df.empty: return float(INITIAL_INVESTMENT), 0, pd.DataFrame() 
             
@@ -299,50 +299,41 @@ class BacktestEngine:
                 
                 # A. SELL (Exit Current Position)
                 if current_ticker != 'CASH':
-                    # Only sell if the new signal is different or CASH, unless the new signal is TQQQ and we are in TQQQ (in which case, the logic should have kept us there)
+                    sell_price = current_day_prices[current_ticker]
+                    realized_cash = shares * sell_price
                     
-                    # If we are holding TQQQ and the new signal is CASH/SQQQ, or we are holding SQQQ and the new signal is CASH/TQQQ:
-                    if trade_ticker != current_ticker: 
-                        sell_price = current_day_prices[current_ticker]
-                        
-                        # Convert shares back to realized cash
-                        realized_cash = shares * sell_price
-                        
-                        # Log the SELL trade.
-                        trade_history.append({
-                            'Date': current_day.name.date(), 
-                            'Action': f"SELL {current_ticker}", 
-                            'Asset': current_ticker, 
-                            'Price': float(sell_price), 
-                            'Portfolio Value': float(realized_cash) 
-                        })
-                        
-                        # Update portfolio state to CASH.
-                        portfolio_value = realized_cash
-                        shares = Decimal("0")
+                    # Log the SELL trade.
+                    trade_history.append({
+                        'Date': current_day.name.date(), 
+                        'Action': f"SELL {current_ticker}", 
+                        'Asset': current_ticker, 
+                        'Price': float(sell_price), 
+                        'Portfolio Value': float(realized_cash) 
+                    })
+                    
+                    # Update portfolio state to CASH.
+                    portfolio_value = realized_cash
+                    shares = Decimal("0")
                 
                 # B. BUY (Enter New Position)
                 if trade_ticker != 'CASH':
+                    buy_price = current_day_prices[trade_ticker]
                     
-                    # Only buy if we weren't already holding the asset (prevents double logging)
-                    if trade_ticker != current_ticker:
-                        buy_price = current_day_prices[trade_ticker]
+                    if buy_price > 0:
+                        # Use the entire CASH amount (portfolio_value) to buy shares
+                        shares = portfolio_value / buy_price
+                    else:
+                        shares = Decimal("0")
+                        portfolio_value = Decimal("0")
                         
-                        if buy_price > 0:
-                            # Use the entire CASH amount (portfolio_value) to buy shares
-                            shares = portfolio_value / buy_price
-                        else:
-                            shares = Decimal("0")
-                            portfolio_value = Decimal("0")
-                            
-                        # Log the BUY trade.
-                        trade_history.append({
-                            'Date': current_day.name.date(), 
-                            'Action': f"BUY {trade_ticker}", 
-                            'Asset': trade_ticker, 
-                            'Price': float(buy_price), 
-                            'Portfolio Value': float(portfolio_value)
-                        })
+                    # Log the BUY trade.
+                    trade_history.append({
+                        'Date': current_day.name.date(), 
+                        'Action': f"BUY {trade_ticker}", 
+                        'Asset': trade_ticker, 
+                        'Price': float(buy_price), 
+                        'Portfolio Value': float(portfolio_value)
+                    })
                         
                 current_ticker = trade_ticker
 
