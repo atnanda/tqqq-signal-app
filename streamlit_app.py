@@ -21,6 +21,9 @@ INITIAL_INVESTMENT = 10000.00
 LEVERAGED_TICKER = "TQQQ"
 INVERSE_TICKER = "SQQQ"
 
+# 🚨 NEW CONSTANT: TQQQ Inception Date (February 9, 2010)
+TQQQ_INCEPTION_DATE = datetime(2010, 2, 9).date()
+
 # Initialize Session State for date/price overrides
 if 'override_price' not in st.session_state:
     st.session_state['override_price'] = None
@@ -28,6 +31,7 @@ if 'override_price' not in st.session_state:
 # --- Timezone-Aware Date Function ---
 
 def get_most_recent_trading_day():
+    """Determines the most recent CLOSED trading day."""
     california_tz = pytz.timezone('America/Los_Angeles')
     now_ca = datetime.now(california_tz)
     market_close_hour = 16
@@ -45,13 +49,19 @@ def get_most_recent_trading_day():
         
     return target_date
 
-# --- Core Helper Function for Data Fetching and Cleaning ---
+# --- Core Helper Function for Data Fetching and Cleaning (UPDATED) ---
 
 @st.cache_data(ttl=60*60*4) 
-def fetch_historical_data(lookback_days=800): 
+def fetch_historical_data(): 
+    """
+    Fetches historical data for QQQ, TQQQ, and SQQQ starting from TQQQ's inception date.
+    Lookback is now fixed to the start of TQQQ.
+    """
     today_for_fetch = get_most_recent_trading_day()
     market_end_date = today_for_fetch + timedelta(days=1) 
-    start_date = today_for_fetch - timedelta(days=lookback_days)
+    
+    # Use TQQQ's inception date for full history backtesting
+    start_date = TQQQ_INCEPTION_DATE
     
     try:
         tickers = [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]
@@ -65,9 +75,8 @@ def fetch_historical_data(lookback_days=800):
             auto_adjust=False,
             timeout=15 
         )
-        # ... (rest of data cleaning remains the same)
-        if all_data.empty:
-            return pd.DataFrame()
+        
+        if all_data.empty: return pd.DataFrame()
 
         df_combined = pd.DataFrame(index=all_data.index)
         
@@ -95,7 +104,7 @@ def fetch_historical_data(lookback_days=800):
         st.error(f"FATAL ERROR during data download: {e}")
         return pd.DataFrame()
 
-# --- Indicator Calculations ---
+# --- Indicator Calculations (UNCHANGED) ---
 
 def calculate_true_range_and_atr(df, atr_period):
     high_minus_low = df['high'] - df['low']
@@ -127,7 +136,6 @@ def calculate_indicators(data_daily, target_date, current_price):
     df['ATR'] = calculate_true_range_and_atr(df, ATR_PERIOD)
     latest_atr = df['ATR'].ffill().iloc[-1]
 
-    # Type check and conversion for robustness
     current_sma_200 = current_sma_200.item() if hasattr(current_sma_200, 'item') else current_sma_200
     latest_ema_5 = latest_ema_5.item() if hasattr(latest_ema_5, 'item') else latest_ema_5
     
@@ -144,7 +152,7 @@ def calculate_indicators(data_daily, target_date, current_price):
     }, df
 
 def generate_signal(indicators):
-    # ... (function body remains the same)
+    """Applies the defined trading strategy logic: VASL and DMA."""
     price = indicators['current_price']
     sma_200 = indicators['sma_200']
     ema_5 = indicators['ema_5']
@@ -170,13 +178,16 @@ def generate_signal(indicators):
 
     return final_signal, trade_ticker, conviction_status, vasl_trigger_level
 
-# --- Backtesting Engine (Logic unchanged from previous step) ---
+# --- Backtesting Engine (UNCHANGED) ---
 
 class BacktestEngine:
+    """Runs a backtest simulation for a given historical dataset."""
+    
     def __init__(self, historical_data):
         self.df = historical_data.copy()
         
     def generate_historical_signals(self):
+        """Generates the trading signal and conviction status for every day in the history."""
         self.df.ta.sma(length=SMA_PERIOD, append=True)
         self.df.ta.ema(length=EMA_PERIOD, append=True)
         high_minus_low = self.df['high'] - self.df['low']
@@ -207,6 +218,7 @@ class BacktestEngine:
         return self.df
         
     def run_simulation(self, start_date):
+        """Runs the $10k simulation and logs all trades."""
         sim_df = self.df[self.df.index.date >= start_date].copy()
         if sim_df.empty: return INITIAL_INVESTMENT, 0, pd.DataFrame() 
             
@@ -262,7 +274,8 @@ class BacktestEngine:
         return portfolio_value, buy_and_hold_qqq, pd.DataFrame(trade_history)
 
 def run_backtests(full_data, target_date):
-    # ... (function body remains the same)
+    """Defines timeframes and runs the backtesting engine."""
+    
     backtester = BacktestEngine(full_data)
     signals_df = backtester.generate_historical_signals()
     
@@ -271,6 +284,7 @@ def run_backtests(full_data, target_date):
         return [], pd.DataFrame()
 
     last_signal_date = signals_df.index.max().date()
+    # 🚨 UPDATED: Use the earliest date where indicators are valid for 'Full History' backtest
     start_of_tradable_data = signals_df.index.min().date() 
     start_of_year = datetime(last_signal_date.year, 1, 1).date()
     ytd_start_date = max(start_of_year, start_of_tradable_data) 
@@ -279,6 +293,7 @@ def run_backtests(full_data, target_date):
     one_week_back = (last_signal_date - timedelta(days=7))
 
     timeframes = [
+        ("Full History", start_of_tradable_data), # New Full History option
         ("YTD (Since First Valid Signal)", ytd_start_date),
         ("3 Months Back", three_months_back),
         ("1 Week Back", one_week_back),
@@ -289,8 +304,7 @@ def run_backtests(full_data, target_date):
     trade_history_for_signal_date = pd.DataFrame() 
     
     for label, start_date in timeframes:
-        if start_date > last_signal_date and label != "Signal Date to Today":
-            continue
+        if start_date > last_signal_date and label != "Signal Date to Today": continue
             
         relevant_dates = signals_df.index[signals_df.index.date >= start_date]
         first_trade_day = relevant_dates.min().date() if not relevant_dates.empty else None
@@ -298,9 +312,7 @@ def run_backtests(full_data, target_date):
         if first_trade_day is None:
             if label == "Signal Date to Today" and start_date <= last_signal_date:
                 first_trade_day = start_date 
-            else:
-                st.warning(f"Skipping {label}: No trading data available on or after {start_date.strftime('%Y-%m-%d')}.")
-                continue
+            else: continue
             
         signal_row_index = signals_df.index[signals_df.index.date >= first_trade_day].min()
         initial_trade = signals_df.loc[signal_row_index, 'Trade_Ticker'] if not pd.isna(signal_row_index) else "N/A"
@@ -325,22 +337,15 @@ def run_backtests(full_data, target_date):
         
     return results, trade_history_for_signal_date
 
-# --- Plotly Charting Function (UPDATED) ---
+# --- Plotly Charting Function (UNCHANGED) ---
 
 def create_chart(df, indicators):
-    """Creates a Plotly candlestick chart with indicators (SMA, EMA, VASL)."""
+    """Creates a Plotly candlestick chart with indicators and date markers."""
     
     df_plot = df.copy() 
     
     fig = go.Figure(data=[
-        go.Candlestick(
-            x=df_plot.index,
-            open=df_plot['open'],
-            high=df_plot['high'],
-            low=df_plot['low'],
-            close=df_plot['close'],
-            name=TICKER
-        )
+        go.Candlestick(x=df_plot.index, open=df_plot['open'], high=df_plot['high'], low=df_plot['low'], close=df_plot['close'], name=TICKER)
     ])
 
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[f'SMA_{SMA_PERIOD}'], mode='lines', name=f'{SMA_PERIOD}-Day SMA', line=dict(color='blue', width=2)))
@@ -351,10 +356,22 @@ def create_chart(df, indicators):
     signal_date = indicators['signal_date']
     signal_price = indicators['signal_price']
     
-    # Get the index (datetime) corresponding to the signal date
     signal_date_index = df_plot.index[df_plot.index.date == signal_date].max()
 
     if pd.notna(signal_date_index):
+        # 1a. Add vertical line for the signal date
+        fig.add_shape(
+            type="line",
+            x0=signal_date_index,
+            y0=df_plot['low'].min(),
+            x1=signal_date_index,
+            y1=df_plot['high'].max(),
+            line=dict(color="yellow", width=2, dash="dash"),
+            layer="below", 
+            name="Signal Date"
+        )
+        
+        # 1b. Add the marker
         fig.add_trace(go.Scatter(
             x=[signal_date_index], 
             y=[signal_price], 
@@ -390,12 +407,13 @@ def create_chart(df, indicators):
 def display_app():
     
     st.set_page_config(page_title="TQQQ/SQQQ Signal", layout="wide")
-    st.title("📈 TQQQ/SQQQ Daily Signal Generator & Backtester")
+    st.title("📈 TQQQ/SQQQ Daily Signal Generator & Full History Backtester")
     st.markdown("Strategy based on **200-Day SMA** (Conviction) and **5-Day EMA/14-Day ATR** (Volatility Stop-Loss).")
     st.markdown("---")
 
     # 1. Data Fetch 
-    data_for_backtest = fetch_historical_data(lookback_days=800)
+    # 🚨 UPDATED: Call fetch_historical_data without lookback_days
+    data_for_backtest = fetch_historical_data()
 
     if data_for_backtest.empty:
         st.error("FATAL ERROR: Signal calculation aborted due to insufficient or missing data.")
@@ -403,7 +421,8 @@ def display_app():
         
     latest_available_date = data_for_backtest.index.max().date()
     first_available_date = data_for_backtest.index.min().date()
-    min_tradeable_date = first_available_date + timedelta(days=200)
+    # Earliest date for calculation is first_available_date + 200 trading days
+    min_tradeable_date = data_for_backtest.iloc[SMA_PERIOD].name.date() 
 
     # --- Sidebar for Inputs ---
     with st.sidebar:
@@ -428,6 +447,7 @@ def display_app():
         st.metric("ATR Period (VASL)", f"{ATR_PERIOD} days")
         st.metric("ATR Multiplier (VASL)", ATR_MULTIPLIER)
         st.metric("Backtest Capital", f"${INITIAL_INVESTMENT:,.2f}")
+        st.caption(f"Full Backtest Data starts from: **{first_available_date.strftime('%Y-%m-%d')}**")
 
 
     st.info(f"Analysis running for market close data on **{target_date.strftime('%A, %B %d, %Y')}**.")
@@ -456,18 +476,38 @@ def display_app():
         st.error(f"FATAL ERROR during indicator calculation or signal generation: {e}")
         st.stop()
 
-
     # 4. Run Backtests
+    # The backtest now uses the full dataset retrieved from TQQQ inception
     backtest_results, trade_history_df = run_backtests(data_for_backtest, target_date)
     
     # ... (Display Signal and Metrics) ...
+    st.header(f"Daily Signal: {target_date.strftime('%Y-%m-%d')}")
     
+    if "BUY TQQQ" in final_signal: st.success(f"## {final_signal}")
+    elif "BUY SQQQ" in final_signal: st.warning(f"## {final_signal}")
+    else: st.error(f"## {final_signal}")
+
+    st.markdown("---")
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Signal Price (QQQ)", f"${indicators['current_price']:.2f}")
+    col2.metric("200-Day SMA", f"${indicators['sma_200']:.2f}")
+    col3.metric("DMA Conviction", conviction_status.split('(')[0].strip()) 
+
+    st.subheader("Volatility Stop-Loss (VASL) Details")
+    col_vasl_level, col_vasl_status = st.columns(2)
+    col_vasl_level.metric("5-Day EMA", f"${indicators['ema_5']:.2f}")
+    col_vasl_level.metric("14-Day ATR", f"${indicators['atr']:.2f}")
+    
+    level_format = col_vasl_status.error if "Triggered" in conviction_status else col_vasl_status.success
+    level_format(f"**VASL Trigger Level:** ${vasl_trigger_level:.2f}")
+
     st.markdown("---")
     
-    # --- 6. Display Results: INTERACTIVE CHART (UPDATED) ---
+    # --- 6. Display Results: INTERACTIVE CHART ---
     st.header("📈 Interactive Indicator Chart")
     
-    # Select the last 200 trading days from the complete dataset
+    # Select the last 200 trading days from the complete dataset for the chart display
     chart_data = data_for_backtest.iloc[-200:].copy() 
     
     if not chart_data.empty:
@@ -494,7 +534,7 @@ def display_app():
 
     st.markdown("---")
     
-    # ... (Sections 7 and 8 for Backtesting and Detailed Trade History remain the same) ...
+    # --- 7. Display Results: AGGREGATE BACKTESTING ---
     st.header("⏱️ Backtest Performance (vs. QQQ Buy & Hold)")
     st.markdown(f"**Simulation:** ${INITIAL_INVESTMENT:,.2f} initial investment traded based on historical daily signals.")
 
@@ -512,6 +552,7 @@ def display_app():
 
     st.markdown("---")
     
+    # --- 8. Display Detailed Trade History ---
     st.header(f"📜 Detailed Trade History (From {target_date.strftime('%Y-%m-%d')} to Today)")
     
     if not trade_history_df.empty:
