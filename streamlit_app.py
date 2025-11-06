@@ -108,8 +108,8 @@ def fetch_historical_data(lookback_days=400):
         df_combined.dropna(subset=required_cols, inplace=True)
 
         if df_combined.shape[0] < SMA_PERIOD:
-            st.error(f"FATAL ERROR: Insufficient clean data ({df_combined.shape[0]} rows) to calculate {SMA_PERIOD}-Day SMA.")
-            return pd.DataFrame() 
+            # This is a general error, but calculation itself will handle it better below
+            st.warning(f"Warning: Data only has {df_combined.shape[0]} rows. May not be enough for a full {SMA_PERIOD}-Day SMA.")
             
         # Return the full dataset up to the most recent trading day
         return df_combined 
@@ -135,7 +135,7 @@ def calculate_true_range_and_atr(df, atr_period):
     
     return atr_series 
 
-# --- Calculation and Signal Functions ---
+# --- Calculation and Signal Functions (FIXED ERROR CHECKING) ---
 
 def calculate_indicators(data_daily, target_date, current_price):
     """Calculates all indicators using data only up to target_date."""
@@ -147,10 +147,17 @@ def calculate_indicators(data_daily, target_date, current_price):
         raise ValueError("No data available for indicator calculation on or before target date.")
         
     df.ta.sma(length=SMA_PERIOD, append=True)
-    current_sma_200 = df[f'SMA_{SMA_PERIOD}'].iloc[-1]
-    
     df.ta.ema(length=EMA_PERIOD, append=True)
-    latest_ema_5 = df[f'EMA_{EMA_PERIOD}'].iloc[-1]
+    
+    sma_col = f'SMA_{SMA_PERIOD}'
+    ema_col = f'EMA_{EMA_PERIOD}'
+
+    # Check for SMA calculation failure (the root cause of the previous error)
+    if sma_col not in df.columns or df[sma_col].isnull().all():
+        raise ValueError(f"Indicator calculation failed: Insufficient data (need {SMA_PERIOD} days) to calculate 200-Day SMA for {target_date}.")
+    
+    current_sma_200 = df[sma_col].iloc[-1]
+    latest_ema_5 = df[ema_col].iloc[-1]
 
     df['ATR'] = calculate_true_range_and_atr(df, ATR_PERIOD)
     
@@ -168,7 +175,7 @@ def calculate_indicators(data_daily, target_date, current_price):
     if not all(np.isfinite([current_sma_200, latest_ema_5, latest_atr])):
         raise ValueError("Indicator calculation resulted in infinite or non-numeric values.")
 
-    df['VASL_Level'] = df[f'EMA_{EMA_PERIOD}'] - (ATR_MULTIPLIER * df['ATR'])
+    df['VASL_Level'] = df[ema_col] - (ATR_MULTIPLIER * df['ATR'])
     
     return {
         'current_price': current_price,
@@ -378,7 +385,6 @@ def create_chart(df, indicators):
         )
     ])
 
-    # These columns exist because we pass the DataFrame returned by calculate_indicators
     fig.add_trace(go.Scatter(
         x=df_plot.index, 
         y=df_plot[f'SMA_{SMA_PERIOD}'], 
@@ -502,9 +508,13 @@ def display_app():
         # Pass the full data set to calculate_indicators (it filters internally)
         indicators, data_with_indicators = calculate_indicators(data_for_backtest, target_date, final_signal_price)
         final_signal, trade_ticker, conviction_status, vasl_trigger_level = generate_signal(indicators) 
+    except ValueError as e: # Catch the specific ValueError for insufficient data
+        st.error(f"FATAL ERROR: {e}")
+        st.stop()
     except Exception as e:
         st.error(f"FATAL ERROR during indicator calculation or signal generation: {e}")
         st.stop()
+
 
     # 4. Run Backtests - Use the full data set for the simulation
     backtest_results = run_backtests(data_for_backtest, target_date)
@@ -546,9 +556,8 @@ def display_app():
     st.header("📈 Interactive Indicator Chart")
     
     try:
-        # FIX: Pass the DataFrame that was returned by calculate_indicators (data_with_indicators)
+        # Pass the DataFrame that was returned by calculate_indicators (data_with_indicators)
         chart_fig = create_chart(data_with_indicators, indicators) 
-        # FIX: Replaced use_container_width=True with width='stretch'
         st.plotly_chart(chart_fig, width='stretch')
     except Exception as e:
         st.error(f"Could not generate chart. Error: {e}")
