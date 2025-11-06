@@ -194,7 +194,7 @@ def generate_signal(indicators):
 
     return final_signal, trade_ticker, conviction_status, vasl_trigger_level
 
-# --- Backtesting Engine (FINAL, Decimal-Based) ---
+# --- Backtesting Engine (REVERTED run_simulation to return 3 items) ---
 
 class BacktestEngine:
     """Runs a backtest simulation for a given historical dataset."""
@@ -243,10 +243,11 @@ class BacktestEngine:
         self.df['Trade_Ticker'] = signals
         return self.df
         
+    # REVERTED: run_simulation now returns 3 values (final_value, buy_and_hold, trade_history_df)
     def run_simulation(self, start_date):
         """Runs the $10k simulation and logs all trades."""
         sim_df = self.df[self.df.index.date >= start_date].copy()
-        if sim_df.empty: return float(INITIAL_INVESTMENT), 0, pd.DataFrame(), pd.DataFrame() 
+        if sim_df.empty: return float(INITIAL_INVESTMENT), 0, pd.DataFrame() 
             
         # Initialize with Decimal
         portfolio_value = INITIAL_INVESTMENT 
@@ -315,7 +316,7 @@ class BacktestEngine:
                 # Update the portfolio value based on the current close price (unrealized P/L)
                 portfolio_value = shares * current_price
             
-            # Log the daily portfolio value
+            # Log the daily portfolio value (No longer needed to be returned, but kept here for logic flow)
             sim_df.loc[current_day.name, 'Portfolio_Value'] = float(portfolio_value) 
 
         # --- FIX: Add final row to trade history for current holding value ---
@@ -337,10 +338,10 @@ class BacktestEngine:
         qqq_start_price = sim_df.iloc[0][qqq_close_col]
         qqq_end_price = sim_df.iloc[-1][qqq_close_col]
         buy_and_hold_qqq = float(INITIAL_INVESTMENT) * (qqq_end_price / qqq_start_price)
-        
-        # 🚨 ADDED: Return the daily simulation data
-        return float(portfolio_value), buy_and_hold_qqq, pd.DataFrame(trade_history), sim_df[['Portfolio_Value']]
 
+        return float(portfolio_value), buy_and_hold_qqq, pd.DataFrame(trade_history)
+
+# REVERTED: run_backtests now returns 2 items (results, trade_history_df)
 def run_backtests(full_data, target_date):
     """Defines timeframes and runs the backtesting engine."""
     
@@ -349,7 +350,7 @@ def run_backtests(full_data, target_date):
     
     if signals_df.empty:
         st.error("Backtest failed: Could not generate historical signals.")
-        return [], pd.DataFrame(), pd.DataFrame() 
+        return [], pd.DataFrame() 
 
     last_signal_date = signals_df.index.max().date()
     # Use the earliest date where indicators are valid for 'Full History' backtest
@@ -370,7 +371,6 @@ def run_backtests(full_data, target_date):
     
     results = []
     trade_history_for_signal_date = pd.DataFrame() 
-    daily_sim_data_for_chart = pd.DataFrame() 
     
     for label, start_date in timeframes:
         if start_date > last_signal_date and label != "Signal Date to Today": continue
@@ -386,8 +386,8 @@ def run_backtests(full_data, target_date):
         signal_row_index = signals_df.index[signals_df.index.date >= first_trade_day].min()
         initial_trade = signals_df.loc[signal_row_index, 'Trade_Ticker'] if not pd.isna(signal_row_index) else "N/A"
         
-        # 🚨 UPDATED: Captured sim_daily_df from run_simulation
-        final_value, buy_and_hold_qqq, trade_history_df, sim_daily_df = backtester.run_simulation(first_trade_day)
+        # REVERTED: run_simulation now returns 3 values
+        final_value, buy_and_hold_qqq, trade_history_df = backtester.run_simulation(first_trade_day)
 
         if label == "Signal Date to Today":
             # Filter out the 'HOLDING VALUE' row for the main backtest table which only logs trades
@@ -395,8 +395,6 @@ def run_backtests(full_data, target_date):
             # Then add the holding value row back for display purposes
             if trade_history_df['Action'].str.contains('HOLDING VALUE').any():
                  trade_history_for_signal_date = pd.concat([trade_history_for_signal_date, trade_history_df[trade_history_df['Action'] == 'HOLDING VALUE'].copy()], ignore_index=True)
-            
-            daily_sim_data_for_chart = sim_daily_df.copy() # 🚨 Captured daily value data
             
         initial_float = float(INITIAL_INVESTMENT)
         profit_loss = final_value - initial_float
@@ -433,9 +431,9 @@ def run_backtests(full_data, target_date):
             "B&H CAGR": bh_qqq_cagr
         })
         
-    return results, trade_history_for_signal_date, daily_sim_data_for_chart # 🚨 UPDATED: Return daily sim data
+    return results, trade_history_for_signal_date
 
-# --- Plotly Charting Function ---
+# --- Plotly Charting Function (REVERTED to single-axis) ---
 
 def calculate_true_range_and_atr_for_chart(df, atr_period):
     """Re-implemented helper for chart logic, which uses float math."""
@@ -448,34 +446,19 @@ def calculate_true_range_and_atr_for_chart(df, atr_period):
     
     return atr_series 
 
-# 🚨 CORRECTED FONT PROPERTIES IN LAYOUT
+# REVERTED: Chart is now single-axis, plotting QQQ price and indicators only.
 def create_chart(df, indicators):
-    """Creates a Plotly candlestick chart with indicators, markers, and portfolio index line."""
+    """Creates a Plotly candlestick chart with indicators and date markers."""
     
     df_plot = df.copy() 
-    has_strategy_index = 'Strategy_Index' in df_plot.columns and not df_plot['Strategy_Index'].isnull().all()
     
-    # --- FIGURE SETUP ---
     fig = go.Figure(data=[
-        # Candlestick chart on primary y-axis (y1)
-        go.Candlestick(x=df_plot.index, open=df_plot['open'], high=df_plot['high'], low=df_plot['low'], close=df_plot['close'], name=TICKER, yaxis='y1')
+        go.Candlestick(x=df_plot.index, open=df_plot['open'], high=df_plot['high'], low=df_plot['low'], close=df_plot['close'], name=TICKER)
     ])
 
-    # Indicator traces on primary y-axis (y1)
-    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[f'SMA_{SMA_PERIOD}'], mode='lines', name=f'{SMA_PERIOD}-Day SMA', line=dict(color='blue', width=2), yaxis='y1'))
-    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[f'EMA_{EMA_PERIOD}'], mode='lines', name=f'{EMA_PERIOD}-Day EMA', line=dict(color='orange', width=1), yaxis='y1'))
-    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['VASL_Level'], mode='lines', name='VASL Level', line=dict(color='red', width=1, dash='dot'), yaxis='y1'))
-
-    # --- NEW TRACE: Strategy Portfolio Value (Normalized Index) ---
-    if has_strategy_index:
-        fig.add_trace(go.Scatter(
-            x=df_plot.index, 
-            y=df_plot['Strategy_Index'], 
-            mode='lines', 
-            name='Strategy Index (y2)', 
-            line=dict(color='yellowgreen', width=3, dash='solid'), 
-            yaxis='y2' # Use secondary y-axis
-        ))
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[f'SMA_{SMA_PERIOD}'], mode='lines', name=f'{SMA_PERIOD}-Day SMA', line=dict(color='blue', width=2)))
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[f'EMA_{EMA_PERIOD}'], mode='lines', name=f'{EMA_PERIOD}-Day EMA', line=dict(color='orange', width=1)))
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['VASL_Level'], mode='lines', name='VASL Level', line=dict(color='red', width=1, dash='dot')))
 
     # 1. Marker for the Price/Indicator on the Historical Signal Date
     signal_date = indicators['signal_date']
@@ -484,7 +467,7 @@ def create_chart(df, indicators):
     signal_date_index = df_plot.index[df_plot.index.date == signal_date].max()
 
     if pd.notna(signal_date_index):
-        # 1a. Add vertical line for the signal date (No Y-axis needed for shape line)
+        # 1a. Add vertical line for the signal date
         fig.add_shape(
             type="line",
             x0=signal_date_index,
@@ -502,8 +485,7 @@ def create_chart(df, indicators):
             y=[signal_price], 
             mode='markers', 
             marker=dict(symbol='star', size=12, color='yellow', line=dict(width=2, color='black')),
-            name=f'Signal Price ({signal_date.strftime("%Y-%m-%d")})',
-            yaxis='y1'
+            name=f'Signal Price ({signal_date.strftime("%Y-%m-%d")})'
         ))
 
     # 2. Marker for the Latest Price (end of the chart)
@@ -514,39 +496,17 @@ def create_chart(df, indicators):
         x=[last_date], y=[latest_price], 
         mode='markers', 
         marker=dict(symbol='circle', size=10, color='lime', line=dict(width=2, color='black')),
-        name='Latest Close Price',
-        yaxis='y1'
+        name='Latest Close Price'
     ))
-    
-    # --- LAYOUT UPDATE for Dual Axis ---
-    layout_params = dict(
-        title=f'{TICKER} Price vs. Strategy Performance Index (Last ~{len(df_plot)} Trading Days)',
+
+    fig.update_layout(
+        title=f'{TICKER} - Trading Strategy Indicators (Last ~{len(df_plot)} Trading Days)',
         xaxis_title="Date",
+        yaxis_title="Price (USD)",
         xaxis_rangeslider_visible=False,
         height=600,
-        template='plotly_dark',
-        # Primary Y-axis config
-        yaxis=dict(
-            title='Price (USD)', 
-            title_font=dict(color='white'), # CORRECTED: Changed 'titlefont' to 'title_font'
-            tickfont=dict(color='white'),
-            side='left',
-        )
+        template='plotly_dark'
     )
-
-    # Secondary Y-axis config (only add if data exists)
-    if has_strategy_index:
-        layout_params['yaxis2'] = dict(
-            title='Strategy Index (Start = 1.0)',
-            overlaying='y',
-            side='right',
-            showgrid=False,
-            title_font=dict(color='yellowgreen'), # CORRECTED: Changed 'titlefont' to 'title_font'
-            tickfont=dict(color='yellowgreen'),
-            tickformat='.2f' # Format index to 2 decimal places
-        )
-    
-    fig.update_layout(**layout_params)
     
     return fig
 
@@ -629,8 +589,8 @@ def display_app():
         st.error(f"FATAL ERROR during indicator calculation or signal generation: {e}")
         st.stop()
 
-    # 4. Run Backtests 🚨 UPDATED: Capture daily_sim_data_for_chart
-    backtest_results, trade_history_df, daily_sim_data_for_chart = run_backtests(data_for_backtest, target_date)
+    # 4. Run Backtests (REVERTED to return 2 DataFrames)
+    backtest_results, trade_history_df = run_backtests(data_for_backtest, target_date)
     
     # ... (Display Signal and Metrics) ...
     st.header(f"Daily Signal: {target_date.strftime('%Y-%m-%d')}")
@@ -656,7 +616,7 @@ def display_app():
 
     st.markdown("---")
     
-    # --- 6. Display Results: INTERACTIVE CHART ---
+    # --- 6. Display Results: INTERACTIVE CHART (REVERTED) ---
     st.header("📈 Interactive Indicator Chart")
     
     # Fetch 400 days to ensure 200-day SMA is calculated for the visible 200-day range
@@ -673,17 +633,6 @@ def display_app():
         # Only display the last 200 trading days
         chart_data = chart_data.iloc[-200:].dropna(subset=[f'SMA_{SMA_PERIOD}'])
 
-        # 🚨 ADDED: Merge Strategy Index data
-        if not daily_sim_data_for_chart.empty:
-            initial_float = float(INITIAL_INVESTMENT)
-            if initial_float > 0:
-                daily_sim_data_for_chart['Strategy_Index'] = daily_sim_data_for_chart['Portfolio_Value'] / initial_float
-            else:
-                daily_sim_data_for_chart['Strategy_Index'] = 0.0
-
-            # Join the strategy index to the chart data frame
-            chart_data = chart_data.join(daily_sim_data_for_chart['Strategy_Index'], how='left')
-
         chart_indicators = {
             'signal_date': target_date,
             'signal_price': final_signal_price,
@@ -691,7 +640,6 @@ def display_app():
         }
         
         try:
-            # 🚨 Updated chart function call
             chart_fig = create_chart(chart_data, chart_indicators) 
             st.plotly_chart(chart_fig, width='stretch')
         except Exception as e:
