@@ -60,10 +60,10 @@ def get_most_recent_trading_day():
 # --- Core Helper Function for Data Fetching and Cleaning ---
 
 @st.cache_data(ttl=60*60*4) 
-def fetch_historical_data(lookback_days=400):
+def fetch_historical_data(lookback_days=800): # UPDATED LOOKBACK TO 800 DAYS
     """
     Fetches historical data for QQQ, TQQQ, and SQQQ up to the 
-    most recent trading day.
+    most recent trading day, with an increased lookback.
     """
     # Ensure data is fetched up to the most recent day for backtesting purposes
     today_for_fetch = get_most_recent_trading_day()
@@ -133,7 +133,7 @@ def calculate_true_range_and_atr(df, atr_period):
     
     return atr_series 
 
-# --- Calculation and Signal Functions (FIXED ERROR CHECKING) ---
+# --- Calculation and Signal Functions ---
 
 def calculate_indicators(data_daily, target_date, current_price):
     """Calculates all indicators using data only up to target_date."""
@@ -152,7 +152,7 @@ def calculate_indicators(data_daily, target_date, current_price):
 
     # Check for SMA calculation failure (the root cause of the previous error)
     if sma_col not in df.columns or df[sma_col].isnull().all():
-        raise ValueError(f"Indicator calculation failed: Insufficient data (need {SMA_PERIOD} days) to calculate 200-Day SMA for {target_date}.")
+        raise ValueError(f"Indicator calculation failed: Insufficient data (need {SMA_PERIOD} days) to calculate 200-Day SMA for {target_date}. Please clear cache or select a later date.")
     
     current_sma_200 = df[sma_col].iloc[-1]
     latest_ema_5 = df[ema_col].iloc[-1]
@@ -438,7 +438,8 @@ def display_app():
     st.markdown("---")
 
     # 1. Data Fetch - Now fetches up to the most recent trading day
-    data_for_backtest = fetch_historical_data(lookback_days=400)
+    # Lookback increased to 800 days here
+    data_for_backtest = fetch_historical_data(lookback_days=800)
 
     if data_for_backtest.empty:
         st.error("FATAL ERROR: Signal calculation aborted due to insufficient or missing data.")
@@ -446,15 +447,17 @@ def display_app():
         
     # Determine the latest available trading date from the fetched data
     latest_available_date = data_for_backtest.index.max().date()
+    first_available_date = data_for_backtest.index.min().date()
 
     # --- Sidebar for Inputs ---
     with st.sidebar:
         st.header("1. Target Date & Price")
         
-        # Use the latest available date as the default and maximum value (THE FIX)
+        # Use the latest available date as the default and maximum value
         target_date = st.date_input(
             "Select Signal Date",
             value=latest_available_date,
+            min_value=first_available_date + timedelta(days=200), # Suggest a minimum date to avoid SMA error
             max_value=latest_available_date # Limits selection to the available data range
         )
         
