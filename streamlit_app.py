@@ -21,7 +21,7 @@ INITIAL_INVESTMENT = 10000.00
 LEVERAGED_TICKER = "TQQQ"
 INVERSE_TICKER = "SQQQ"
 
-# 🚨 NEW CONSTANT: TQQQ Inception Date (February 9, 2010)
+# 🚨 TQQQ Inception Date (February 9, 2010)
 TQQQ_INCEPTION_DATE = datetime(2010, 2, 9).date()
 
 # Initialize Session State for date/price overrides
@@ -49,13 +49,12 @@ def get_most_recent_trading_day():
         
     return target_date
 
-# --- Core Helper Function for Data Fetching and Cleaning (UPDATED) ---
+# --- Core Helper Function for Data Fetching and Cleaning ---
 
 @st.cache_data(ttl=60*60*4) 
 def fetch_historical_data(): 
     """
     Fetches historical data for QQQ, TQQQ, and SQQQ starting from TQQQ's inception date.
-    Lookback is now fixed to the start of TQQQ.
     """
     today_for_fetch = get_most_recent_trading_day()
     market_end_date = today_for_fetch + timedelta(days=1) 
@@ -104,7 +103,7 @@ def fetch_historical_data():
         st.error(f"FATAL ERROR during data download: {e}")
         return pd.DataFrame()
 
-# --- Indicator Calculations (UNCHANGED) ---
+# --- Indicator Calculations ---
 
 def calculate_true_range_and_atr(df, atr_period):
     high_minus_low = df['high'] - df['low']
@@ -178,7 +177,7 @@ def generate_signal(indicators):
 
     return final_signal, trade_ticker, conviction_status, vasl_trigger_level
 
-# --- Backtesting Engine (FIXED) ---
+# --- Backtesting Engine (FINAL FIX) ---
 
 class BacktestEngine:
     """Runs a backtest simulation for a given historical dataset."""
@@ -190,11 +189,7 @@ class BacktestEngine:
         """Generates the trading signal and conviction status for every day in the history."""
         self.df.ta.sma(length=SMA_PERIOD, append=True)
         self.df.ta.ema(length=EMA_PERIOD, append=True)
-        high_minus_low = self.df['high'] - self.df['low']
-        high_minus_prev_close = np.abs(self.df['high'] - self.df['close'].shift(1))
-        low_minus_prev_close = np.abs(self.df['low'] - self.df['close'].shift(1))
-        true_range = pd.DataFrame({'hl': high_minus_low, 'hpc': high_minus_prev_close, 'lpc': low_minus_prev_close}).max(axis=1)
-        self.df['ATR'] = true_range.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean()
+        self.df['ATR'] = calculate_true_range_and_atr(self.df, ATR_PERIOD)
         self.df.dropna(subset=[f'SMA_{SMA_PERIOD}', f'EMA_{EMA_PERIOD}', 'ATR'], inplace=True)
 
         if self.df.empty: return pd.DataFrame()
@@ -222,7 +217,7 @@ class BacktestEngine:
         sim_df = self.df[self.df.index.date >= start_date].copy()
         if sim_df.empty: return INITIAL_INVESTMENT, 0, pd.DataFrame() 
             
-        portfolio_value = INITIAL_INVESTMENT
+        portfolio_value = INITIAL_INVESTMENT # Represents total capital (cash + invested value)
         shares = 0
         current_ticker = 'CASH'
         trade_history = [] 
@@ -231,58 +226,62 @@ class BacktestEngine:
             current_day = sim_df.iloc[i]
             trade_ticker = current_day['Trade_Ticker']
             
-            # Check for trade signal change
+            # --- 1. HANDLE TRADE SIGNAL CHANGE ---
             if trade_ticker != current_ticker:
                 
-                # 1. Handle SELL (Exit Current Position)
+                # A. SELL (Exit Current Position)
                 if current_ticker != 'CASH':
                     sell_price_col = f'{current_ticker}_close'
                     sell_price = current_day[sell_price_col]
                     
-                    # 🚨 FIX 1: Calculate the realized cash (the new portfolio_value)
+                    # Convert shares back to realized cash
                     realized_cash = shares * sell_price
                     
-                    # 🚨 FIX 2: Log the SELL trade using the realized cash value
+                    # Log the SELL trade.
                     trade_history.append({
                         'Date': current_day.name.date(), 
                         'Action': f"SELL {current_ticker}", 
                         'Asset': current_ticker, 
                         'Price': sell_price, 
-                        'Portfolio Value': realized_cash # Log the cash received
+                        'Portfolio Value': realized_cash 
                     })
                     
-                    # Update portfolio state
+                    # 🚨 FIX 1: Update portfolio state to CASH. The portfolio_value now is the realized cash.
                     portfolio_value = realized_cash
                     shares = 0
 
-                # 2. Handle BUY (Enter New Position)
+                # B. BUY (Enter New Position)
                 if trade_ticker != 'CASH':
                     buy_price_col = f'{trade_ticker}_close'
                     buy_price = current_day[buy_price_col]
                     
                     if buy_price > 0:
-                        shares = portfolio_value / buy_price
-                        # portfolio_value remains the same, but now represents the value of shares
+                        # Use the entire CASH amount (portfolio_value) to buy shares
+                        # Using round to mitigate minor floating point issues, while maintaining high precision
+                        shares = round(portfolio_value / buy_price, 8) 
+                        # portfolio_value remains the same amount, but is now invested value.
                     else:
                         shares = 0
-                        portfolio_value = 0 # Loss due to zero price
+                        portfolio_value = 0 # Loss if price is zero
                     
-                    # 🚨 FIX 3: Log the BUY trade using the cash value (which is now invested)
+                    # Log the BUY trade.
                     trade_history.append({
                         'Date': current_day.name.date(), 
                         'Action': f"BUY {trade_ticker}", 
                         'Asset': trade_ticker, 
                         'Price': buy_price, 
-                        'Portfolio Value': portfolio_value # Log the amount invested
+                        'Portfolio Value': portfolio_value
                     })
                     
                 current_ticker = trade_ticker
 
-            # Update portfolio value for tracking (unrealized value)
+            # --- 2. TRACKING: UPDATE PORTFOLIO VALUE FOR THE CURRENT DAY'S CLOSE ---
+            # 🚨 FIX 2: This update MUST run on every day to track the unrealized P/L of the position.
             if shares > 0:
                 current_price_col = f'{current_ticker}_close'
+                # Update the portfolio value based on the current close price (unrealized P/L)
                 portfolio_value = shares * current_day[current_price_col]
-            # Else: portfolio_value is the CASH amount if shares == 0
+            # If shares is 0 (in CASH), portfolio_value holds the fixed CASH amount, so no update is needed.
 
             sim_df.loc[current_day.name, 'Portfolio_Value'] = portfolio_value 
 
@@ -305,7 +304,7 @@ def run_backtests(full_data, target_date):
         return [], pd.DataFrame()
 
     last_signal_date = signals_df.index.max().date()
-    # 🚨 UPDATED: Use the earliest date where indicators are valid for 'Full History' backtest
+    # Use the earliest date where indicators are valid for 'Full History' backtest
     start_of_tradable_data = signals_df.index.min().date() 
     start_of_year = datetime(last_signal_date.year, 1, 1).date()
     ytd_start_date = max(start_of_year, start_of_tradable_data) 
@@ -358,7 +357,7 @@ def run_backtests(full_data, target_date):
         
     return results, trade_history_for_signal_date
 
-# --- Plotly Charting Function (UNCHANGED) ---
+# --- Plotly Charting Function ---
 
 def create_chart(df, indicators):
     """Creates a Plotly candlestick chart with indicators and date markers."""
@@ -423,7 +422,7 @@ def create_chart(df, indicators):
     
     return fig
 
-# --- Streamlit Application Layout (UPDATED) ---
+# --- Streamlit Application Layout ---
 
 def display_app():
     
@@ -433,7 +432,6 @@ def display_app():
     st.markdown("---")
 
     # 1. Data Fetch 
-    # 🚨 UPDATED: Call fetch_historical_data without lookback_days
     data_for_backtest = fetch_historical_data()
 
     if data_for_backtest.empty:
@@ -443,7 +441,11 @@ def display_app():
     latest_available_date = data_for_backtest.index.max().date()
     first_available_date = data_for_backtest.index.min().date()
     # Earliest date for calculation is first_available_date + 200 trading days
-    min_tradeable_date = data_for_backtest.iloc[SMA_PERIOD].name.date() 
+    min_tradeable_date_index = SMA_PERIOD 
+    if len(data_for_backtest) > min_tradeable_date_index:
+        min_tradeable_date = data_for_backtest.iloc[min_tradeable_date_index].name.date() 
+    else:
+        min_tradeable_date = latest_available_date
 
     # --- Sidebar for Inputs ---
     with st.sidebar:
@@ -451,10 +453,11 @@ def display_app():
         
         target_date = st.date_input("Select Signal Date", value=latest_available_date, min_value=min_tradeable_date, max_value=latest_available_date)
         
-        if target_date.weekday() > 4:
-            st.error(f"**{target_date.strftime('%Y-%m-%d')} is a weekend.** Please select a trading day.")
-            st.stop()
-            
+        # Simple check for weekends based on date, relies on data fetch handling non-trading days
+        if target_date.weekday() > 4 and target_date in data_for_backtest.index.date:
+             st.warning(f"**{target_date.strftime('%Y-%m-%d')} is a weekend.** Displaying data from the closest prior trading day if available.")
+             # Continue, as data fetching handles non-trading days by usually returning the last closing data
+
         st.session_state['override_price'] = st.number_input("Optional: Override Signal Price ($)", value=None, min_value=0.01, format="%.2f", help="Manually test the strategy at a specific price level.")
 
         if st.button("Clear Data Cache & Rerun", help="Forces a fresh download."):
@@ -481,6 +484,9 @@ def display_app():
     if final_signal_price is None:
         try:
             data_for_signal_price = data_for_backtest[data_for_backtest.index.date <= target_date].copy()
+            if data_for_signal_price.empty:
+                 st.error(f"No data available on or before {target_date.strftime('%Y-%m-%d')}.")
+                 st.stop()
             final_signal_price = data_for_signal_price[qqq_close_col_name].iloc[-1].item()
         except Exception as e:
             st.error(f"FATAL ERROR: Could not find the Adjusted Close price for the target date. Error: {e}")
@@ -498,7 +504,6 @@ def display_app():
         st.stop()
 
     # 4. Run Backtests
-    # The backtest now uses the full dataset retrieved from TQQQ inception
     backtest_results, trade_history_df = run_backtests(data_for_backtest, target_date)
     
     # ... (Display Signal and Metrics) ...
