@@ -318,6 +318,20 @@ class BacktestEngine:
             # Log the daily portfolio value
             sim_df.loc[current_day.name, 'Portfolio_Value'] = float(portfolio_value) 
 
+        # --- FIX: Add final row to trade history for current holding value ---
+        if current_ticker != 'CASH' and shares > 0:
+            last_date = sim_df.index[-1].date()
+            final_price = current_day_prices[current_ticker]
+            
+            trade_history.append({
+                'Date': last_date, 
+                'Action': f"HOLDING VALUE", 
+                'Asset': current_ticker, 
+                'Price': float(final_price), 
+                'Portfolio Value': float(portfolio_value)
+            })
+
+
         # Final B&H calculation
         qqq_close_col = f'{TICKER}_close'
         qqq_start_price = sim_df.iloc[0][qqq_close_col]
@@ -374,13 +388,17 @@ def run_backtests(full_data, target_date):
         final_value, buy_and_hold_qqq, trade_history_df = backtester.run_simulation(first_trade_day)
 
         if label == "Signal Date to Today":
-            trade_history_for_signal_date = trade_history_df
+            # Filter out the 'HOLDING VALUE' row for the main backtest table which only logs trades
+            trade_history_for_signal_date = trade_history_df[trade_history_df['Action'] != 'HOLDING VALUE'].copy()
+            # Then add the holding value row back for display purposes
+            if trade_history_df['Action'].str.contains('HOLDING VALUE').any():
+                 trade_history_for_signal_date = pd.concat([trade_history_for_signal_date, trade_history_df[trade_history_df['Action'] == 'HOLDING VALUE'].copy()], ignore_index=True)
             
         initial_float = float(INITIAL_INVESTMENT)
         profit_loss = final_value - initial_float
         bh_profit_loss = buy_and_hold_qqq - initial_float
 
-        # --- NEW CAGR CALCULATION START ---
+        # --- CAGR CALCULATION ---
         end_date = last_signal_date # Use the date of the last signal for calculation
         
         # Calculate the number of years (using 365.25 for average days per year)
@@ -398,7 +416,6 @@ def run_backtests(full_data, target_date):
             bh_qqq_cagr = ( (buy_and_hold_qqq / initial_float) ** (1 / years_held) - 1 ) * 100
         else:
             bh_qqq_cagr = 0.0
-        # --- NEW CAGR CALCULATION END ---
             
         results.append({
             "Timeframe": label,
@@ -480,7 +497,7 @@ def create_chart(df, indicators):
     ))
 
     fig.update_layout(
-        title=f'{TICKER} - Trading Strategy Indicators (Last ~200 Trading Days)',
+        title=f'{TICKER} - Trading Strategy Indicators (Last ~{len(df_plot)} Trading Days)',
         xaxis_title="Date",
         yaxis_title="Price (USD)",
         xaxis_rangeslider_visible=False,
@@ -596,10 +613,11 @@ def display_app():
 
     st.markdown("---")
     
-    # --- 6. Display Results: INTERACTIVE CHART ---
+    # --- 6. Display Results: INTERACTIVE CHART (FIXED: Increased lookback) ---
     st.header("📈 Interactive Indicator Chart")
     
-    chart_data = data_for_backtest.iloc[-200:].copy() 
+    # Fetch 400 days to ensure 200-day SMA is calculated for the visible 200-day range
+    chart_data = data_for_backtest.iloc[-400:].copy() 
     
     if not chart_data.empty:
         # Recalculate indicators on the full visible range for accurate display
@@ -608,6 +626,9 @@ def display_app():
         # Use the float-based helper for the chart data
         chart_data['ATR'] = calculate_true_range_and_atr_for_chart(chart_data, ATR_PERIOD)
         chart_data['VASL_Level'] = chart_data[f'EMA_{EMA_PERIOD}'] - (ATR_MULTIPLIER * chart_data['ATR'])
+        
+        # Only display the last 200 trading days
+        chart_data = chart_data.iloc[-200:].dropna(subset=[f'SMA_{SMA_PERIOD}'])
 
         chart_indicators = {
             'signal_date': target_date,
@@ -649,18 +670,35 @@ def display_app():
 
     st.markdown("---")
     
-    # --- 8. Display Detailed Trade History ---
+    # --- 8. Display Detailed Trade History (FIXED: Final holding row) ---
     st.header(f"📜 Detailed Trade History (From {target_date.strftime('%Y-%m-%d')} to Today)")
     
     if not trade_history_df.empty:
+        
+        # Identify the last row which contains the unrealized value
+        final_holding_row_index = trade_history_df.index[trade_history_df['Action'] == 'HOLDING VALUE'].tolist()
+        
+        # Apply formatting
         trade_history_df['Price'] = trade_history_df['Price'].map('${:,.2f}'.format)
         trade_history_df['Portfolio Value'] = trade_history_df['Portfolio Value'].map('${:,.2f}'.format)
         
-        st.dataframe(trade_history_df, 
-            column_config={"Date": st.column_config.DatetimeColumn("Date", format="YYYY-MM-DD"), "Action": st.column_config.Column("Action", help="Trade action", width="small"), "Asset": st.column_config.Column("Asset", width="small")},
-            hide_index=True)
+        # Apply styling to the last row (unrealized value)
+        def highlight_final_row(row):
+            if row.name in final_holding_row_index:
+                return ['background-color: #0d47a1'] * len(row) # Dark blue for final value
+            return [''] * len(row)
+
+        st.dataframe(
+            trade_history_df.style.apply(highlight_final_row, axis=1), 
+            column_config={
+                "Date": st.column_config.DatetimeColumn("Date", format="YYYY-MM-DD"), 
+                "Action": st.column_config.Column("Action", help="Trade action", width="small"), 
+                "Asset": st.column_config.Column("Asset", width="small")
+            },
+            hide_index=True
+        )
             
-        st.caption("This table logs every time the strategy transitions to a new position.")
+        st.caption("This table logs every time the strategy transitions to a new position. The **dark blue row** shows the unrealized value of the last asset held.")
     else:
         st.info("No trades were executed during the selected 'Signal Date to Today' backtest period.")
 
