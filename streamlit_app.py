@@ -7,6 +7,10 @@ import streamlit as st
 import numpy as np
 import plotly.graph_objects as go
 import pytz
+from decimal import Decimal, getcontext
+
+# Set precision for Decimal operations to high value (e.g., 50 places)
+getcontext().prec = 50 
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -17,11 +21,12 @@ EMA_PERIOD = 5
 ATR_PERIOD = 14
 ATR_MULTIPLIER = 2.0
 SMA_PERIOD = 200
-INITIAL_INVESTMENT = 10000.00
+# 🚨 FIX: Convert INITIAL_INVESTMENT to Decimal
+INITIAL_INVESTMENT = Decimal("10000.00")
 LEVERAGED_TICKER = "TQQQ"
 INVERSE_TICKER = "SQQQ"
 
-# 🚨 TQQQ Inception Date (February 9, 2010)
+# TQQQ Inception Date (February 9, 2010)
 TQQQ_INCEPTION_DATE = datetime(2010, 2, 9).date()
 
 # Initialize Session State for date/price overrides
@@ -59,7 +64,6 @@ def fetch_historical_data():
     today_for_fetch = get_most_recent_trading_day()
     market_end_date = today_for_fetch + timedelta(days=1) 
     
-    # Use TQQQ's inception date for full history backtesting
     start_date = TQQQ_INCEPTION_DATE
     
     try:
@@ -177,7 +181,7 @@ def generate_signal(indicators):
 
     return final_signal, trade_ticker, conviction_status, vasl_trigger_level
 
-# --- Backtesting Engine (FINAL FIX) ---
+# --- Backtesting Engine (FINAL, Decimal-Based) ---
 
 class BacktestEngine:
     """Runs a backtest simulation for a given historical dataset."""
@@ -215,10 +219,11 @@ class BacktestEngine:
     def run_simulation(self, start_date):
         """Runs the $10k simulation and logs all trades."""
         sim_df = self.df[self.df.index.date >= start_date].copy()
-        if sim_df.empty: return INITIAL_INVESTMENT, 0, pd.DataFrame() 
+        if sim_df.empty: return float(INITIAL_INVESTMENT), 0, pd.DataFrame() 
             
-        portfolio_value = INITIAL_INVESTMENT # Represents total capital (cash + invested value)
-        shares = 0
+        # 🚨 FIX: Initialize with Decimal
+        portfolio_value = INITIAL_INVESTMENT 
+        shares = Decimal("0")
         current_ticker = 'CASH'
         trade_history = [] 
 
@@ -226,13 +231,18 @@ class BacktestEngine:
             current_day = sim_df.iloc[i]
             trade_ticker = current_day['Trade_Ticker']
             
+            # Convert float prices from DataFrame to Decimal
+            current_day_prices = {}
+            for t in [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]:
+                if f'{t}_close' in current_day:
+                    current_day_prices[t] = Decimal(str(current_day[f'{t}_close']))
+            
             # --- 1. HANDLE TRADE SIGNAL CHANGE ---
             if trade_ticker != current_ticker:
                 
                 # A. SELL (Exit Current Position)
                 if current_ticker != 'CASH':
-                    sell_price_col = f'{current_ticker}_close'
-                    sell_price = current_day[sell_price_col]
+                    sell_price = current_day_prices[current_ticker]
                     
                     # Convert shares back to realized cash
                     realized_cash = shares * sell_price
@@ -242,56 +252,53 @@ class BacktestEngine:
                         'Date': current_day.name.date(), 
                         'Action': f"SELL {current_ticker}", 
                         'Asset': current_ticker, 
-                        'Price': sell_price, 
-                        'Portfolio Value': realized_cash 
+                        'Price': float(sell_price), 
+                        'Portfolio Value': float(realized_cash) # Log as float for Streamlit display
                     })
                     
-                    # 🚨 FIX 1: Update portfolio state to CASH. The portfolio_value now is the realized cash.
+                    # Update portfolio state to CASH.
                     portfolio_value = realized_cash
-                    shares = 0
+                    shares = Decimal("0")
 
                 # B. BUY (Enter New Position)
                 if trade_ticker != 'CASH':
-                    buy_price_col = f'{trade_ticker}_close'
-                    buy_price = current_day[buy_price_col]
+                    buy_price = current_day_prices[trade_ticker]
                     
                     if buy_price > 0:
                         # Use the entire CASH amount (portfolio_value) to buy shares
-                        # Using round to mitigate minor floating point issues, while maintaining high precision
-                        shares = round(portfolio_value / buy_price, 8) 
+                        shares = portfolio_value / buy_price
                         # portfolio_value remains the same amount, but is now invested value.
                     else:
-                        shares = 0
-                        portfolio_value = 0 # Loss if price is zero
+                        shares = Decimal("0")
+                        portfolio_value = Decimal("0")
                     
                     # Log the BUY trade.
                     trade_history.append({
                         'Date': current_day.name.date(), 
                         'Action': f"BUY {trade_ticker}", 
                         'Asset': trade_ticker, 
-                        'Price': buy_price, 
-                        'Portfolio Value': portfolio_value
+                        'Price': float(buy_price), 
+                        'Portfolio Value': float(portfolio_value)
                     })
                     
                 current_ticker = trade_ticker
 
             # --- 2. TRACKING: UPDATE PORTFOLIO VALUE FOR THE CURRENT DAY'S CLOSE ---
-            # 🚨 FIX 2: This update MUST run on every day to track the unrealized P/L of the position.
             if shares > 0:
-                current_price_col = f'{current_ticker}_close'
+                current_price = current_day_prices[current_ticker]
                 # Update the portfolio value based on the current close price (unrealized P/L)
-                portfolio_value = shares * current_day[current_price_col]
-            # If shares is 0 (in CASH), portfolio_value holds the fixed CASH amount, so no update is needed.
-
-            sim_df.loc[current_day.name, 'Portfolio_Value'] = portfolio_value 
+                portfolio_value = shares * current_price
+            
+            # Log the daily portfolio value
+            sim_df.loc[current_day.name, 'Portfolio_Value'] = float(portfolio_value) 
 
         # Final B&H calculation
         qqq_close_col = f'{TICKER}_close'
         qqq_start_price = sim_df.iloc[0][qqq_close_col]
         qqq_end_price = sim_df.iloc[-1][qqq_close_col]
-        buy_and_hold_qqq = INITIAL_INVESTMENT * (qqq_end_price / qqq_start_price)
+        buy_and_hold_qqq = float(INITIAL_INVESTMENT) * (qqq_end_price / qqq_start_price)
 
-        return portfolio_value, buy_and_hold_qqq, pd.DataFrame(trade_history)
+        return float(portfolio_value), buy_and_hold_qqq, pd.DataFrame(trade_history)
 
 def run_backtests(full_data, target_date):
     """Defines timeframes and runs the backtesting engine."""
@@ -337,13 +344,15 @@ def run_backtests(full_data, target_date):
         signal_row_index = signals_df.index[signals_df.index.date >= first_trade_day].min()
         initial_trade = signals_df.loc[signal_row_index, 'Trade_Ticker'] if not pd.isna(signal_row_index) else "N/A"
         
+        # 🚨 Pass the Decimal version of INITIAL_INVESTMENT as a float for the metric calculations
         final_value, buy_and_hold_qqq, trade_history_df = backtester.run_simulation(first_trade_day)
 
         if label == "Signal Date to Today":
             trade_history_for_signal_date = trade_history_df
             
-        profit_loss = final_value - INITIAL_INVESTMENT
-        bh_profit_loss = buy_and_hold_qqq - INITIAL_INVESTMENT
+        initial_float = float(INITIAL_INVESTMENT)
+        profit_loss = final_value - initial_float
+        bh_profit_loss = buy_and_hold_qqq - initial_float
         
         results.append({
             "Timeframe": label,
@@ -358,6 +367,17 @@ def run_backtests(full_data, target_date):
     return results, trade_history_for_signal_date
 
 # --- Plotly Charting Function ---
+
+def calculate_true_range_and_atr_for_chart(df, atr_period):
+    """Re-implemented helper for chart logic, which uses float math."""
+    high_minus_low = df['high'] - df['low']
+    high_minus_prev_close = np.abs(df['high'] - df['close'].shift(1))
+    low_minus_prev_close = np.abs(df['low'] - df['close'].shift(1))
+    
+    true_range = pd.DataFrame({'hl': high_minus_low, 'hpc': high_minus_prev_close, 'lpc': low_minus_prev_close}).max(axis=1)
+    atr_series = true_range.ewm(span=atr_period, adjust=False, min_periods=atr_period).mean()
+    
+    return atr_series 
 
 def create_chart(df, indicators):
     """Creates a Plotly candlestick chart with indicators and date markers."""
@@ -440,7 +460,7 @@ def display_app():
         
     latest_available_date = data_for_backtest.index.max().date()
     first_available_date = data_for_backtest.index.min().date()
-    # Earliest date for calculation is first_available_date + 200 trading days
+    
     min_tradeable_date_index = SMA_PERIOD 
     if len(data_for_backtest) > min_tradeable_date_index:
         min_tradeable_date = data_for_backtest.iloc[min_tradeable_date_index].name.date() 
@@ -453,10 +473,8 @@ def display_app():
         
         target_date = st.date_input("Select Signal Date", value=latest_available_date, min_value=min_tradeable_date, max_value=latest_available_date)
         
-        # Simple check for weekends based on date, relies on data fetch handling non-trading days
         if target_date.weekday() > 4 and target_date in data_for_backtest.index.date:
              st.warning(f"**{target_date.strftime('%Y-%m-%d')} is a weekend.** Displaying data from the closest prior trading day if available.")
-             # Continue, as data fetching handles non-trading days by usually returning the last closing data
 
         st.session_state['override_price'] = st.number_input("Optional: Override Signal Price ($)", value=None, min_value=0.01, format="%.2f", help="Manually test the strategy at a specific price level.")
 
@@ -470,7 +488,7 @@ def display_app():
         st.metric("EMA Period (VASL)", f"{EMA_PERIOD} days")
         st.metric("ATR Period (VASL)", f"{ATR_PERIOD} days")
         st.metric("ATR Multiplier (VASL)", ATR_MULTIPLIER)
-        st.metric("Backtest Capital", f"${INITIAL_INVESTMENT:,.2f}")
+        st.metric("Backtest Capital", f"${float(INITIAL_INVESTMENT):,.2f}")
         st.caption(f"Full Backtest Data starts from: **{first_available_date.strftime('%Y-%m-%d')}**")
 
 
@@ -533,21 +551,20 @@ def display_app():
     # --- 6. Display Results: INTERACTIVE CHART ---
     st.header("📈 Interactive Indicator Chart")
     
-    # Select the last 200 trading days from the complete dataset for the chart display
     chart_data = data_for_backtest.iloc[-200:].copy() 
     
     if not chart_data.empty:
         # Recalculate indicators on the full visible range for accurate display
         chart_data.ta.sma(length=SMA_PERIOD, append=True)
         chart_data.ta.ema(length=EMA_PERIOD, append=True)
-        chart_data['ATR'] = calculate_true_range_and_atr(chart_data, ATR_PERIOD)
+        # Use the float-based helper for the chart data
+        chart_data['ATR'] = calculate_true_range_and_atr_for_chart(chart_data, ATR_PERIOD)
         chart_data['VASL_Level'] = chart_data[f'EMA_{EMA_PERIOD}'] - (ATR_MULTIPLIER * chart_data['ATR'])
 
-        # Prepare indicator dictionary for the chart function
         chart_indicators = {
             'signal_date': target_date,
             'signal_price': final_signal_price,
-            'final_price': data_for_backtest['close'].iloc[-1] # The price for the very last day
+            'final_price': data_for_backtest['close'].iloc[-1] 
         }
         
         try:
@@ -562,7 +579,7 @@ def display_app():
     
     # --- 7. Display Results: AGGREGATE BACKTESTING ---
     st.header("⏱️ Backtest Performance (vs. QQQ Buy & Hold)")
-    st.markdown(f"**Simulation:** ${INITIAL_INVESTMENT:,.2f} initial investment traded based on historical daily signals.")
+    st.markdown(f"**Simulation:** ${float(INITIAL_INVESTMENT):,.2f} initial investment traded based on historical daily signals.")
 
     if backtest_results:
         df_results = pd.DataFrame(backtest_results)
