@@ -60,12 +60,15 @@ def get_most_recent_trading_day():
 # --- Core Helper Function for Data Fetching and Cleaning ---
 
 @st.cache_data(ttl=60*60*4) 
-def fetch_historical_data(target_date, lookback_days=400):
+def fetch_historical_data(lookback_days=400):
     """
-    Fetches historical data for QQQ, TQQQ, and SQQQ.
+    Fetches historical data for QQQ, TQQQ, and SQQQ up to the 
+    most recent trading day.
     """
-    market_end_date = target_date + timedelta(days=1) 
-    start_date = target_date - timedelta(days=lookback_days)
+    # Ensure data is fetched up to the most recent day for backtesting purposes
+    today_for_fetch = get_most_recent_trading_day()
+    market_end_date = today_for_fetch + timedelta(days=1) 
+    start_date = today_for_fetch - timedelta(days=lookback_days)
     
     try:
         tickers = [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]
@@ -108,7 +111,8 @@ def fetch_historical_data(target_date, lookback_days=400):
             st.error(f"FATAL ERROR: Insufficient clean data ({df_combined.shape[0]} rows) to calculate {SMA_PERIOD}-Day SMA.")
             return pd.DataFrame() 
             
-        return df_combined[df_combined.index.date <= target_date]
+        # Return the full dataset up to the most recent trading day
+        return df_combined 
 
     except Exception as e:
         st.error(f"FATAL ERROR during data download: {e}")
@@ -133,11 +137,14 @@ def calculate_true_range_and_atr(df, atr_period):
 
 # --- Calculation and Signal Functions ---
 
-def calculate_indicators(data_daily, current_price):
-    """Calculates all indicators."""
+def calculate_indicators(data_daily, target_date, current_price):
+    """Calculates all indicators using data only up to target_date."""
     
-    df = data_daily.copy() 
+    df = data_daily[data_daily.index.date <= target_date].copy() 
     
+    if df.empty:
+        raise ValueError("No data available for indicator calculation on or before target date.")
+        
     df.ta.sma(length=SMA_PERIOD, append=True)
     current_sma_200 = df[f'SMA_{SMA_PERIOD}'].iloc[-1]
     
@@ -244,6 +251,7 @@ class BacktestEngine:
     def run_simulation(self, start_date):
         """Runs the $10k simulation from the start date to the end of the data."""
         
+        # Simulates from start_date to the end of the full dataset
         sim_df = self.df[self.df.index.date >= start_date].copy()
         
         if sim_df.empty:
@@ -299,36 +307,41 @@ def run_backtests(full_data, target_date):
         st.error("Backtest failed: Could not generate historical signals.")
         return []
 
-    today = target_date 
+    # Get the last date in the fully calculated signal dataset
+    last_signal_date = signals_df.index.max().date()
+    
     start_of_tradable_data = signals_df.index.min().date() 
-    start_of_year = datetime(today.year, 1, 1).date()
+    start_of_year = datetime(last_signal_date.year, 1, 1).date()
     ytd_start_date = max(start_of_year, start_of_tradable_data) 
     
-    three_months_back = (today - timedelta(days=90))
-    one_week_back = (today - timedelta(days=7))
+    three_months_back = (last_signal_date - timedelta(days=90))
+    one_week_back = (last_signal_date - timedelta(days=7))
 
     timeframes = [
         ("YTD (Since First Valid Signal)", ytd_start_date),
         ("3 Months Back", three_months_back),
         ("1 Week Back", one_week_back),
-        ("Signal Date", today), # NEW ENTRY
+        # This will now run from the user's selected date (target_date) to the end of the data (last_signal_date)
+        ("Signal Date to Today", target_date), 
     ]
     
     results = []
     
     for label, start_date in timeframes:
-        if start_date > today:
+        # For past dates, if the start date is later than the last data point, skip.
+        if start_date > last_signal_date and label != "Signal Date to Today":
             continue
             
         relevant_dates = signals_df.index[signals_df.index.date >= start_date]
         first_trade_day = relevant_dates.min().date() if not relevant_dates.empty else None
 
-        # Ensure "Signal Date" runs even if only the current day is available
-        if first_trade_day is None and label == "Signal Date":
-             first_trade_day = today
-        elif first_trade_day is None:
-            st.warning(f"Skipping {label}: No trading data available on or after {start_date.strftime('%Y-%m-%d')}.")
-            continue
+        if first_trade_day is None:
+            # For the "Signal Date to Today" entry, if the start date is outside the data range, use the max available.
+            if label == "Signal Date to Today" and start_date <= last_signal_date:
+                first_trade_day = start_date
+            else:
+                st.warning(f"Skipping {label}: No trading data available on or after {start_date.strftime('%Y-%m-%d')}.")
+                continue
             
         final_value, buy_and_hold_qqq = backtester.run_simulation(first_trade_day)
         
@@ -398,7 +411,6 @@ def create_chart(df, indicators):
         name='Signal Price'
     ))
 
-    # FIX: Replace use_container_width=True with width='stretch'
     fig.update_layout(
         title=f'{TICKER} - Trading Strategy Indicators (Last ~200 Days)',
         xaxis_title="Date",
@@ -461,25 +473,24 @@ def display_app():
     st.info(f"Analysis running for market close data on **{target_date.strftime('%A, %B %d, %Y')}**.")
     st.markdown("---")
     
-    # 1. Data Fetch
-    data_for_indicators = fetch_historical_data(target_date, lookback_days=400)
+    # 1. Data Fetch - Now fetches up to the most recent trading day
+    data_for_backtest = fetch_historical_data(lookback_days=400)
 
-    if data_for_indicators.empty:
+    if data_for_backtest.empty:
         st.error("FATAL ERROR: Signal calculation aborted due to insufficient or missing data.")
         st.stop()
 
-    # 2. Determine Final Signal Price
+    # 2. Determine Final Signal Price (using data only up to target_date)
     final_signal_price = st.session_state['override_price']
     qqq_close_col_name = f'{TICKER}_close'
     
+    # Filter data to calculate indicators and get the signal price only up to the target_date
+    data_for_indicators = data_for_backtest[data_for_backtest.index.date <= target_date].copy()
+    
     if final_signal_price is None:
         try:
-            price_row = data_for_indicators.loc[data_for_indicators.index.date == target_date]
-            
-            if not price_row.empty:
-                final_signal_price = price_row[qqq_close_col_name].iloc[0].item()
-            else:
-                final_signal_price = data_for_indicators[qqq_close_col_name].iloc[-1].item()
+            # Use the close price of the *last day in the filtered set*
+            final_signal_price = data_for_indicators[qqq_close_col_name].iloc[-1].item()
         
         except Exception as e:
             st.error(f"FATAL ERROR: Could not find the Adjusted Close price for the target date. Error: {e}")
@@ -487,14 +498,15 @@ def display_app():
 
     # 3. Calculate and Generate Signal
     try:
-        indicators, data_with_indicators = calculate_indicators(data_for_indicators, final_signal_price)
+        # Pass the filtered data set
+        indicators, data_with_indicators = calculate_indicators(data_for_backtest, target_date, final_signal_price)
         final_signal, trade_ticker, conviction_status, vasl_trigger_level = generate_signal(indicators) 
     except Exception as e:
         st.error(f"FATAL ERROR during indicator calculation or signal generation: {e}")
         st.stop()
 
-    # 4. Run Backtests
-    backtest_results = run_backtests(data_for_indicators, target_date)
+    # 4. Run Backtests - Use the full data set for the simulation
+    backtest_results = run_backtests(data_for_backtest, target_date)
     
     # --- 5. Display Results: CURRENT SIGNAL ---
     
@@ -533,9 +545,8 @@ def display_app():
     st.header("📈 Interactive Indicator Chart")
     
     try:
-        chart_fig = create_chart(data_with_indicators, indicators)
-        # FIX: The old chart function used use_container_width=True.
-        # Replacing the argument in st.plotly_chart:
+        # Pass the filtered data set for charting
+        chart_fig = create_chart(data_for_indicators, indicators) 
         st.plotly_chart(chart_fig, width='stretch')
     except Exception as e:
         st.error(f"Could not generate chart. Error: {e}")
@@ -553,7 +564,6 @@ def display_app():
         df_results['B&H QQQ Value'] = df_results['B&H QQQ Value'].map('${:,.2f}'.format)
         
         df_results['P/L'] = df_results['P/L'].map(lambda x: f"{'+' if x >= 0 else ''}${x:,.2f}")
-        # FIX: Corrected column name access from 'B/H P/L' to 'B&H P/L'
         df_results['B&H P/L'] = df_results['B&H P/L'].map(lambda x: f"{'+' if x >= 0 else ''}${x:,.2f}")
         
         df_results = df_results.rename(columns={
