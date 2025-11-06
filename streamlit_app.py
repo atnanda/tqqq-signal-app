@@ -21,7 +21,7 @@ EMA_PERIOD = 5
 ATR_PERIOD = 14
 ATR_MULTIPLIER = 2.0
 SMA_PERIOD = 200
-# 🚨 FIX: Convert INITIAL_INVESTMENT to Decimal
+# 🚨 Convert INITIAL_INVESTMENT to Decimal
 INITIAL_INVESTMENT = Decimal("10000.00")
 LEVERAGED_TICKER = "TQQQ"
 INVERSE_TICKER = "SQQQ"
@@ -297,7 +297,7 @@ class BacktestEngine:
                     else:
                         shares = Decimal("0")
                         portfolio_value = Decimal("0")
-                    
+                        
                     # Log the BUY trade.
                     trade_history.append({
                         'Date': current_day.name.date(), 
@@ -379,7 +379,27 @@ def run_backtests(full_data, target_date):
         initial_float = float(INITIAL_INVESTMENT)
         profit_loss = final_value - initial_float
         bh_profit_loss = buy_and_hold_qqq - initial_float
+
+        # --- NEW CAGR CALCULATION START ---
+        end_date = last_signal_date # Use the date of the last signal for calculation
         
+        # Calculate the number of years (using 365.25 for average days per year)
+        days_held = (end_date - first_trade_day).days
+        years_held = days_held / 365.25 if days_held > 0 else 1 # Avoid division by zero, use 1 year minimum for CAGR formula if days_held is 0
+        
+        # Strategy CAGR
+        if final_value > 0 and initial_float > 0 and years_held > 0:
+            strategy_cagr = ( (final_value / initial_float) ** (1 / years_held) - 1 ) * 100
+        else:
+            strategy_cagr = 0.0
+
+        # B&H QQQ CAGR
+        if buy_and_hold_qqq > 0 and initial_float > 0 and years_held > 0:
+            bh_qqq_cagr = ( (buy_and_hold_qqq / initial_float) ** (1 / years_held) - 1 ) * 100
+        else:
+            bh_qqq_cagr = 0.0
+        # --- NEW CAGR CALCULATION END ---
+            
         results.append({
             "Timeframe": label,
             "Start Date": first_trade_day.strftime('%Y-%m-%d'),
@@ -387,7 +407,9 @@ def run_backtests(full_data, target_date):
             "Strategy Value": final_value,
             "B&H QQQ Value": buy_and_hold_qqq,
             "P/L": profit_loss,
-            "B&H P/L": bh_profit_loss
+            "B&H P/L": bh_profit_loss,
+            "Strategy CAGR": strategy_cagr, 
+            "B&H CAGR": bh_qqq_cagr
         })
         
     return results, trade_history_for_signal_date
@@ -614,8 +636,14 @@ def display_app():
         df_results['P/L'] = df_results['P/L'].map(lambda x: f"{'+' if x >= 0 else ''}${x:,.2f}")
         df_results['B&H P/L'] = df_results['B&H P/L'].map(lambda x: f"{'+' if x >= 0 else ''}${x:,.2f}")
         
+        # Format the new CAGR columns
+        df_results['Strategy CAGR'] = df_results['Strategy CAGR'].map(lambda x: f"{'+' if x >= 0 else ''}{x:,.2f}%")
+        df_results['B&H CAGR'] = df_results['B&H CAGR'].map(lambda x: f"{'+' if x >= 0 else ''}{x:,.2f}%")
+        
         df_results = df_results.rename(columns={"B&H QQQ Value": "B&H Value", "B&H P/L": "B&H P/L", "Initial Trade": "First Trade"})
-        column_order = ["Timeframe", "Start Date", "First Trade", "Strategy Value", "P/L", "B&H Value", "B&H P/L"]
+        
+        # Updated column order to include CAGR
+        column_order = ["Timeframe", "Start Date", "First Trade", "Strategy Value", "Strategy CAGR", "B&H Value", "B&H CAGR"]
         df_results = df_results[column_order]
         st.dataframe(df_results, hide_index=True)
 
