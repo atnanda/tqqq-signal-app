@@ -60,22 +60,24 @@ def get_most_recent_trading_day():
 def fetch_historical_data(): 
     """
     Fetches historical data for QQQ, TQQQ, and SQQQ starting from TQQQ's inception date.
+    
+    FIX 1A (Data Prep): Now fetches Open price for all tickers for realistic execution.
+    FIX 3A (Data Prep): Ensures use of Adj Close/Close for indicator calculation.
     """
     today_for_fetch = get_most_recent_trading_day()
     market_end_date = today_for_fetch + timedelta(days=1) 
     
     start_date = TQQQ_INCEPTION_DATE
+    tickers = [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]
     
     try:
-        tickers = [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]
-        
         all_data = yf.download(
             tickers, 
             start=start_date, 
             end=market_end_date, 
             interval="1d", 
             progress=False,
-            auto_adjust=False,
+            auto_adjust=False, # We handle Adj Close/Close selection below
             timeout=15 
         )
         
@@ -84,21 +86,29 @@ def fetch_historical_data():
         df_combined = pd.DataFrame(index=all_data.index)
         
         for ticker in tickers:
-            close_col_name = f"{ticker}_close"
+            # Prioritize Adj Close, fallback to Close
             if ('Adj Close', ticker) in all_data.columns:
-                df_combined[close_col_name] = all_data['Adj Close'][ticker]
+                df_combined[f'{ticker}_close'] = all_data['Adj Close'][ticker]
             elif ('Close', ticker) in all_data.columns:
-                df_combined[close_col_name] = all_data['Close'][ticker]
+                df_combined[f'{ticker}_close'] = all_data['Close'][ticker]
+            
+            # Get Open Price for execution (Fix 1A)
+            if ('Open', ticker) in all_data.columns:
+                 df_combined[f'{ticker}_open'] = all_data['Open'][ticker]
                 
+            # Get QQQ high/low for ATR calculation
             if ticker == TICKER:
-                for metric in ['Open', 'High', 'Low', 'Volume']:
+                for metric in ['High', 'Low', 'Volume']:
                     if (metric, ticker) in all_data.columns:
                         df_combined[metric.lower()] = all_data[metric][ticker]
         
         if f'{TICKER}_close' in df_combined.columns:
             df_combined['close'] = df_combined[f'{TICKER}_close']
             
-        required_cols = ['high', 'low', 'close', f'{LEVERAGED_TICKER}_close', f'{INVERSE_TICKER}_close']
+        required_cols = ['high', 'low', 'close', 
+                         f'{LEVERAGED_TICKER}_close', f'{INVERSE_TICKER}_close',
+                         f'{TICKER}_open', f'{LEVERAGED_TICKER}_open', f'{INVERSE_TICKER}_open']
+                         
         df_combined.dropna(subset=required_cols, inplace=True)
         
         return df_combined 
@@ -110,6 +120,7 @@ def fetch_historical_data():
 # --- Indicator Calculations ---
 
 def calculate_true_range_and_atr(df, atr_period):
+    # This uses QQQ high/low/close, which comes from the Adj Close series (Fix 3A consistent)
     high_minus_low = df['high'] - df['low']
     high_minus_prev_close = np.abs(df['high'] - df['close'].shift(1))
     low_minus_prev_close = np.abs(df['low'] - df['close'].shift(1))
@@ -120,7 +131,7 @@ def calculate_true_range_and_atr(df, atr_period):
     return atr_series 
 
 def calculate_indicators(data_daily, target_date, current_price):
-    """Calculates all indicators using data only up to target_date."""
+    """Calculates all indicators using data only up to target_date (Close Price)."""
     df = data_daily[data_daily.index.date <= target_date].copy() 
     
     if df.empty:
@@ -157,10 +168,7 @@ def calculate_indicators(data_daily, target_date, current_price):
 
 def generate_signal(indicators, current_holding_ticker=None):
     """
-    Applies the refined trading strategy logic: 
-    1. VASL 
-    2. DMA (stricter TQQQ entry) 
-    3. Inverse EMA Exit.
+    Applies the refined trading strategy logic.
     """
     price = indicators['current_price']
     sma_200 = indicators['sma_200']
@@ -229,20 +237,20 @@ class BacktestEngine:
         """
         Generates the trading signal for every day in the history using the refined logic.
         
-        CORRECTION: The signal for Day N is generated using Day N-1's indicators.
-        The price used as the trigger is the close price of Day N.
+        FIX 1A (Signal Generation): The signal for Day N is generated using Day N-1's indicators.
+        The price used as the trigger is the close price of Day N-1 (for lookahead freedom).
         """
         # 1. Calculate all indicators on the existing data
         self.df.ta.sma(length=SMA_PERIOD, append=True)
         self.df.ta.ema(length=EMA_PERIOD, append=True)
         self.df['ATR'] = calculate_true_range_and_atr(self.df, ATR_PERIOD)
         
-        # 2. Shift indicators one day forward to simulate using the *prior* day's close data
-        # for the current day's trading decision.
-        indicator_cols = [f'SMA_{SMA_PERIOD}', f'EMA_{EMA_PERIOD}', 'ATR']
+        # 2. Shift indicators and the QQQ Close price one day forward to simulate using the *prior* day's close data
+        indicator_cols = [f'SMA_{SMA_PERIOD}', f'EMA_{EMA_PERIOD}', 'ATR', 'close']
         
-        # DataFrame containing indicator values from the previous day, aligned to the current day
-        df_shifted_indicators = self.df[indicator_cols].shift(1)
+        # DataFrame containing indicator values (and QQQ Close Price) from the previous day, aligned to the current day
+        df_prev_day_data = self.df[indicator_cols].shift(1)
+        df_prev_day_data.rename(columns={'close': 'prev_close'}, inplace=True)
         
         # 3. Initialize signal and tracking
         self.df['Trade_Ticker'] = 'CASH' # Default is CASH
@@ -251,26 +259,24 @@ class BacktestEngine:
         # Start from the second day, as the first day's shifted indicators are NaN
         for index in self.df.index[1:]: 
             row = self.df.loc[index]
-            
-            # Get the indicators *from the previous day*
-            prev_indicators = df_shifted_indicators.loc[index]
+            prev_data = df_prev_day_data.loc[index]
             
             # If indicators are not yet calculated (i.e., less than SMA_PERIOD days)
-            if pd.isna(prev_indicators[f'SMA_{SMA_PERIOD}']):
+            if pd.isna(prev_data[f'SMA_{SMA_PERIOD}']):
                 current_ticker_historical = 'CASH'
                 continue
                 
-            # Current day's close price (The trigger price)
-            price = row['close']
+            # Previous day's QQQ Close price (The trigger price - FIX 1A Lookahead Free)
+            price = prev_data['prev_close'] 
             
             # Previous day's indicator values
-            ema_5 = prev_indicators[f'EMA_{EMA_PERIOD}']
-            sma_200 = prev_indicators[f'SMA_{SMA_PERIOD}']
-            atr = prev_indicators['ATR']
+            ema_5 = prev_data[f'EMA_{EMA_PERIOD}']
+            sma_200 = prev_data[f'SMA_{SMA_PERIOD}']
+            atr = prev_data['ATR']
 
             vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)
             
-            # --- Signal Logic Based on Day N-1 Indicators (and Day N Price as Trigger) ---
+            # --- Signal Logic Based on Day N-1 Data ---
             
             # 1. PRIORITY 1: VASL
             if price < vasl_trigger_level:
@@ -303,7 +309,12 @@ class BacktestEngine:
         return self.df
         
     def run_simulation(self, start_date):
-        """Runs the $10k simulation and logs all trades. (CORRECTED LOGIC)"""
+        """
+        Runs the $10k simulation and logs all trades. 
+        
+        FIX 1A (Execution): Trades execute at the current day's Open price, 
+        using the signal generated from the previous day's close.
+        """
         sim_df = self.df[self.df.index.date >= start_date].copy()
         if sim_df.empty: return float(INITIAL_INVESTMENT), 0, pd.DataFrame() 
             
@@ -320,15 +331,18 @@ class BacktestEngine:
             # Convert float prices from DataFrame to Decimal
             current_day_prices = {}
             for t in [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]:
-                if f'{t}_close' in current_day:
-                    current_day_prices[t] = Decimal(str(current_day[f'{t}_close']))
+                # CLOSE price for P/L tracking (unrealized value)
+                current_day_prices[f'{t}_close_dec'] = Decimal(str(current_day[f'{t}_close']))
+                # OPEN price for execution (Fix 1A)
+                current_day_prices[f'{t}_open_dec'] = Decimal(str(current_day[f'{t}_open']))
             
             # --- 1. HANDLE TRADE SIGNAL CHANGE ---
             if trade_ticker != current_ticker:
                 
                 # A. SELL (Exit Current Position)
                 if current_ticker != 'CASH':
-                    sell_price = current_day_prices.get(current_ticker, Decimal("0"))
+                    # Execute SELL at the current day's Open price (Fix 1A)
+                    sell_price = current_day_prices.get(f'{current_ticker}_open_dec', Decimal("0"))
                     if sell_price > 0:
                          realized_cash = shares * sell_price
                     else:
@@ -349,7 +363,8 @@ class BacktestEngine:
                 
                 # B. BUY (Enter New Position)
                 if trade_ticker != 'CASH':
-                    buy_price = current_day_prices.get(trade_ticker, Decimal("0"))
+                    # Execute BUY at the current day's Open price (Fix 1A)
+                    buy_price = current_day_prices.get(f'{trade_ticker}_open_dec', Decimal("0"))
                     
                     if buy_price > 0:
                         # Use the entire CASH amount (portfolio_value) to buy shares
@@ -371,7 +386,8 @@ class BacktestEngine:
 
             # --- 2. TRACKING: UPDATE PORTFOLIO VALUE FOR THE CURRENT DAY'S CLOSE ---
             if current_ticker != 'CASH' and shares > 0:
-                current_price = current_day_prices.get(current_ticker, Decimal("0"))
+                # Use CLOSE price for tracking P/L (unrealized value)
+                current_price = current_day_prices.get(f'{current_ticker}_close_dec', Decimal("0"))
                 # Update the portfolio value based on the current close price (unrealized P/L)
                 portfolio_value = shares * current_price
             
@@ -381,7 +397,7 @@ class BacktestEngine:
         # --- FIX: Add final row to trade history for current holding value ---
         if current_ticker != 'CASH' and shares > 0:
             last_date = sim_df.index[-1].date()
-            final_price = current_day_prices.get(current_ticker, Decimal("0"))
+            final_price = current_day_prices.get(f'{current_ticker}_close_dec', Decimal("0"))
             
             trade_history.append({
                 'Date': last_date, 
@@ -600,7 +616,7 @@ def display_app():
         if target_date.weekday() > 4 and target_date in data_for_backtest.index.date:
              st.warning(f"**{target_date.strftime('%Y-%m-%d')} is a weekend.** Displaying data from the closest prior trading day if available.")
 
-        st.session_state['override_price'] = st.number_input("Optional: Override Signal Price ($)", value=None, min_value=0.01, format="%.2f", help="Manually test the strategy at a specific price level.")
+        st.session_state['override_price'] = st.number_input("Optional: Override Signal Price (QQQ Close $)", value=None, min_value=0.01, format="%.2f", help="Manually test the strategy at a specific QQQ Close price level (used for indicator calculation).")
 
         if st.button("Clear Data Cache & Rerun", help="Forces a fresh download."):
             st.cache_data.clear()
@@ -629,6 +645,7 @@ def display_app():
             if data_for_signal_price.empty:
                  st.error(f"No data available on or before {target_date.strftime('%Y-%m-%d')}.")
                  st.stop()
+            # Use the actual close price of the target day for current analysis/signal display
             final_signal_price = data_for_signal_price[qqq_close_col_name].iloc[-1].item()
         except Exception as e:
             st.error(f"FATAL ERROR: Could not find the Adjusted Close price for the target date. Error: {e}")
@@ -638,6 +655,7 @@ def display_app():
     try:
         indicators, data_with_indicators = calculate_indicators(data_for_backtest, target_date, final_signal_price)
         # For the final signal, we assume we are not holding anything if testing an arbitrary date
+        # The target date analysis uses current data, unlike the backtest which uses lagged data
         final_signal, trade_ticker, conviction_status, vasl_trigger_level = generate_signal(indicators) 
     except ValueError as e: 
         st.error(f"FATAL ERROR: {e}")
@@ -647,6 +665,7 @@ def display_app():
         st.stop()
 
     # 4. Run Backtests
+    # Backtests now use the improved lookahead-free logic (Fix 1A)
     backtest_results, trade_history_df = run_backtests(data_for_backtest, target_date)
     
     # ... (Display Signal and Metrics) ...
@@ -659,7 +678,7 @@ def display_app():
     st.markdown("---")
 
     col1, col2, col3 = st.columns(3)
-    col1.metric("Signal Price (QQQ)", f"${indicators['current_price']:.2f}")
+    col1.metric("Signal Price (QQQ Close)", f"${indicators['current_price']:.2f}")
     col2.metric("200-Day SMA", f"${indicators['sma_200']:.2f}")
     col3.metric("DMA Conviction", conviction_status.split('(')[0].strip()) 
 
@@ -708,7 +727,7 @@ def display_app():
     
     # --- 7. Display Results: AGGREGATE BACKTESTING ---
     st.header("⏱️ Backtest Performance (vs. QQQ Buy & Hold)")
-    st.markdown(f"**Simulation:** ${float(INITIAL_INVESTMENT):,.2f} initial investment traded based on historical daily signals (Refined 5EMA confirmation for TQQQ entry only).")
+    st.markdown(f"**Simulation:** ${float(INITIAL_INVESTMENT):,.2f} initial investment traded based on **lookahead-free historical daily signals**, executed at the **next day's Open price**.")
 
     if backtest_results:
         df_results = pd.DataFrame(backtest_results)
@@ -732,6 +751,7 @@ def display_app():
     
     # --- 8. Display Detailed Trade History ---
     st.header(f"📜 Detailed Trade History (From {target_date.strftime('%Y-%m-%d')} to Today)")
+    st.caption("**Trades listed here are executed at the Open price of the Date shown.**")
     
     if not trade_history_df.empty:
         
@@ -750,7 +770,7 @@ def display_app():
             hide_index=True
         )
             
-        st.caption("This table logs every time the strategy transitions to a new position. The **final row** shows the unrealized value of the last asset held.")
+        st.caption("This table logs every time the strategy transitions to a new position. The **final row** shows the unrealized value of the last asset held (calculated at the final day's close price).")
     else:
         st.info("No trades were executed during the selected 'Signal Date to Today' backtest period.")
 
