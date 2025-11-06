@@ -613,7 +613,7 @@ def display_app():
 
     st.markdown("---")
     
-    # --- 6. Display Results: INTERACTIVE CHART (FIXED: Increased lookback) ---
+    # --- 6. Display Results: INTERACTIVE CHART ---
     st.header("📈 Interactive Indicator Chart")
     
     # Fetch 400 days to ensure 200-day SMA is calculated for the visible 200-day range
@@ -670,26 +670,21 @@ def display_app():
 
     st.markdown("---")
     
-    # --- 8. Display Detailed Trade History (FIXED: Final holding row) ---
+    # --- 8. Display Detailed Trade History ---
     st.header(f"📜 Detailed Trade History (From {target_date.strftime('%Y-%m-%d')} to Today)")
     
     if not trade_history_df.empty:
         
-        # Identify the last row which contains the unrealized value
+        # Identify the last row which contains the unrealized value (for the caption)
         final_holding_row_index = trade_history_df.index[trade_history_df['Action'] == 'HOLDING VALUE'].tolist()
         
         # Apply formatting
         trade_history_df['Price'] = trade_history_df['Price'].map('${:,.2f}'.format)
         trade_history_df['Portfolio Value'] = trade_history_df['Portfolio Value'].map('${:,.2f}'.format)
         
-        # Apply styling to the last row (unrealized value)
-        def highlight_final_row(row):
-            if row.name in final_holding_row_index:
-                return ['background-color: #0d47a1'] * len(row) # Dark blue for final value
-            return [''] * len(row)
-
+        # Display the dataframe without custom row styling
         st.dataframe(
-            trade_history_df.style.apply(highlight_final_row, axis=1), 
+            trade_history_df, 
             column_config={
                 "Date": st.column_config.DatetimeColumn("Date", format="YYYY-MM-DD"), 
                 "Action": st.column_config.Column("Action", help="Trade action", width="small"), 
@@ -698,7 +693,7 @@ def display_app():
             hide_index=True
         )
             
-        st.caption("This table logs every time the strategy transitions to a new position. The **dark blue row** shows the unrealized value of the last asset held.")
+        st.caption("This table logs every time the strategy transitions to a new position. The **final row** shows the unrealized value of the last asset held.")
     else:
         st.info("No trades were executed during the selected 'Signal Date to Today' backtest period.")
 
