@@ -6,6 +6,7 @@ import warnings
 import streamlit as st
 import numpy as np
 import plotly.graph_objects as go 
+import pytz # NEW: Import for timezone handling
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -23,6 +24,40 @@ INVERSE_TICKER = "SQQQ"
 # Initialize Session State for date/price overrides
 if 'override_price' not in st.session_state:
     st.session_state['override_price'] = None
+
+# --- Timezone-Aware Date Function (Updated for California Time) ---
+
+def get_most_recent_trading_day():
+    """
+    Determines the most recent CLOSED trading day based on the California 
+    (Pacific Time) timezone and a 4:30 PM PT cutoff.
+    """
+    
+    # 1. Define the California Time Zone
+    california_tz = pytz.timezone('America/Los_Angeles')
+    
+    # 2. Get the current California time
+    now_ca = datetime.now(california_tz)
+    
+    # 3. Define market close time (4:00 PM PT for US markets)
+    # We use 4:30 PM (16:30) to be safely after the close and reporting.
+    market_close_hour = 16
+    market_close_minute = 30
+    
+    target_date = now_ca.date()
+
+    # Create a timezone-aware cutoff time for comparison
+    cutoff_time = now_ca.replace(hour=market_close_hour, minute=market_close_minute, second=0, microsecond=0)
+    
+    if now_ca < cutoff_time:
+        # If the time is before 4:30 PM PT, the signal is based on the *previous* day's close.
+        target_date -= timedelta(days=1)
+
+    # 4. Handle Weekends: Wind back to the previous Friday if needed
+    while target_date.weekday() > 4: # 5=Saturday, 6=Sunday
+        target_date -= timedelta(days=1)
+        
+    return target_date
 
 # --- Core Helper Function for Data Fetching and Cleaning ---
 
@@ -267,7 +302,9 @@ class BacktestEngine:
                 current_price_col = f'{current_ticker}_close'
                 portfolio_value = shares * current_day[current_price_col]
             
-            sim_df.loc[current_day.name, 'Portfolio_Value'] = portfolio_value
+            # The backtest must run on the full dataframe to prevent SettingWithCopyWarning
+            # but for simplicity in this Streamlit context, we use .loc on the filtered copy
+            sim_df.loc[current_day.name, 'Portfolio_Value'] = portfolio_value 
 
         # Calculate final buy-and-hold value for comparison
         qqq_close_col = f'{TICKER}_close'
@@ -406,13 +443,6 @@ def create_chart(df, indicators):
 
 # --- Streamlit Application Layout ---
 
-def get_most_recent_trading_day():
-    today = datetime.today().date()
-    target_date = today
-    while target_date.weekday() > 4: 
-        target_date -= timedelta(days=1)
-    return target_date
-
 def display_app():
     
     st.set_page_config(page_title="TQQQ/SQQQ Signal", layout="wide")
@@ -425,6 +455,8 @@ def display_app():
         st.header("1. Target Date & Price")
         
         default_date = get_most_recent_trading_day()
+        st.info(f"Date is calculated based on **{default_date.strftime('%A, %B %d, %Y')}** (Pacific Time Market Close).") # Show PT calculation status
+        
         target_date = st.date_input(
             "Select Signal Date",
             value=default_date,
