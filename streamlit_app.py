@@ -17,8 +17,7 @@ warnings.filterwarnings("ignore")
 
 # --- Configuration (Constants) ---
 TICKER = "QQQ"
-EMA_PERIOD_FAST = 5 # Used for TQQQ Entry Confirmation and VASL/SQQQ Exit
-EMA_PERIOD_QUICK_EXIT = 10 # Used for TQQQ Quick Exit
+EMA_PERIOD = 5
 ATR_PERIOD = 14
 ATR_MULTIPLIER = 2.0
 SMA_PERIOD = 200
@@ -128,36 +127,30 @@ def calculate_indicators(data_daily, target_date, current_price):
         raise ValueError("No data available for indicator calculation on or before target date.")
         
     df.ta.sma(length=SMA_PERIOD, append=True)
-    df.ta.ema(length=EMA_PERIOD_FAST, append=True)
-    df.ta.ema(length=EMA_PERIOD_QUICK_EXIT, close='close', append=True) # Calculate the 10-Day EMA
+    df.ta.ema(length=EMA_PERIOD, append=True)
     
     sma_col = f'SMA_{SMA_PERIOD}'
-    ema_fast_col = f'EMA_{EMA_PERIOD_FAST}'
-    ema_quick_exit_col = f'EMA_{EMA_PERIOD_QUICK_EXIT}'
     
     if sma_col not in df.columns or df[sma_col].isnull().all():
         raise ValueError(f"Indicator calculation failed: Insufficient data (need {SMA_PERIOD} days) to calculate 200-Day SMA for {target_date}.")
     
     current_sma_200 = df[sma_col].iloc[-1]
-    latest_ema_5 = df[ema_fast_col].iloc[-1]
-    latest_ema_10 = df[ema_quick_exit_col].iloc[-1]
+    latest_ema_5 = df[f'EMA_{EMA_PERIOD}'].iloc[-1]
     df['ATR'] = calculate_true_range_and_atr(df, ATR_PERIOD)
     latest_atr = df['ATR'].ffill().iloc[-1]
 
     current_sma_200 = current_sma_200.item() if hasattr(current_sma_200, 'item') else current_sma_200
     latest_ema_5 = latest_ema_5.item() if hasattr(latest_ema_5, 'item') else latest_ema_5
-    latest_ema_10 = latest_ema_10.item() if hasattr(latest_ema_10, 'item') else latest_ema_10
     
-    if not all(np.isfinite([current_sma_200, latest_ema_5, latest_ema_10, latest_atr])):
+    if not all(np.isfinite([current_sma_200, latest_ema_5, latest_atr])):
         raise ValueError("Indicator calculation resulted in infinite or non-numeric values.")
 
-    df['VASL_Level'] = df[ema_fast_col] - (ATR_MULTIPLIER * df['ATR'])
+    df['VASL_Level'] = df[f'EMA_{EMA_PERIOD}'] - (ATR_MULTIPLIER * df['ATR'])
     
     return {
         'current_price': current_price,
         'sma_200': current_sma_200,
         'ema_5': latest_ema_5,
-        'ema_10': latest_ema_10,
         'atr': latest_atr
     }, df
 
@@ -165,13 +158,12 @@ def generate_signal(indicators, current_holding_ticker=None):
     """
     Applies the refined trading strategy logic: 
     1. VASL 
-    2. DMA (5-EMA confirmation and 10-EMA quick exit) 
+    2. DMA (stricter TQQQ entry) 
     3. Inverse EMA Exit.
     """
     price = indicators['current_price']
     sma_200 = indicators['sma_200']
     ema_5 = indicators['ema_5']
-    ema_10 = indicators['ema_10']
     atr = indicators['atr']
 
     vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)
@@ -182,29 +174,24 @@ def generate_signal(indicators, current_holding_ticker=None):
         trade_ticker = 'CASH'
         conviction_status = "VASL Triggered - Move to CASH"
     else:
-        # 2. PRIORITY 2: DMA (Directional Conviction - with strict TQQQ entry and 10-EMA quick exit)
+        # 2. PRIORITY 2: DMA (Directional Conviction - with strict TQQQ entry)
         dma_bull_price = (price >= sma_200)
-        dma_bull_ema_confirm = (ema_5 >= sma_200) # 5-EMA CONFIRMATION FILTER (Reinstated)
+        dma_bull_ema = (ema_5 >= sma_200) # EMA CONFIRMATION FILTER
         
         if dma_bull_price:
-            # A. TQQQ QUICK EXIT (10-Day EMA Rule)
-            if price < ema_10 and current_holding_ticker == LEVERAGED_TICKER:
-                conviction_status = "DMA - Exit TQQQ (Price fell below 10-Day EMA)"
-                final_signal = "**SELL TQQQ / CASH (Quick Exit)**"
-                trade_ticker = 'CASH'
+            # Price is Bullish (Above 200-SMA)
             
-            # B. TQQQ ENTRY/HOLD (Strict 5-EMA Confirmation)
-            elif dma_bull_ema_confirm:
-                # TQQQ ENTRY/HOLD: Requires Price >= 200SMA AND 5EMA >= 200SMA
+            if dma_bull_ema:
+                # DMA: BULL (Price AND EMA confirm momentum) -> ENTRY/HOLD TQQQ
                 conviction_status = "DMA - Bull (LONG TQQQ confirmed by 5EMA)"
                 final_signal = "**BUY TQQQ**"
                 trade_ticker = LEVERAGED_TICKER
-            
-            # C. TQQQ LAGGING/ENTRY FILTER FAIL (Price is Bullish, but 5EMA is lagging 200SMA)
             else:
+                # DMA: Neutral (Price is bull, but 5EMA is lagging 200SMA)
+                
                 if current_holding_ticker == LEVERAGED_TICKER:
-                    # RETAIN: If holding TQQQ, this condition (5EMA lag) is NOT an exit rule (only 10EMA is).
-                    conviction_status = "DMA - Hold TQQQ (Price Bullish, 5EMA lagging but not exit condition)"
+                    # RETAIN: If already in TQQQ, this condition (EMA lag) is NOT an exit rule.
+                    conviction_status = "DMA - Hold TQQQ (Price Bullish, EMA lagging but not exit condition)"
                     final_signal = "**HOLD TQQQ**"
                     trade_ticker = LEVERAGED_TICKER
                 else:
@@ -240,12 +227,9 @@ class BacktestEngine:
     def generate_historical_signals(self):
         """Generates the trading signal for every day in the history using the refined logic."""
         self.df.ta.sma(length=SMA_PERIOD, append=True)
-        self.df.ta.ema(length=EMA_PERIOD_FAST, append=True)
-        self.df.ta.ema(length=EMA_PERIOD_QUICK_EXIT, close='close', append=True)
+        self.df.ta.ema(length=EMA_PERIOD, append=True)
         self.df['ATR'] = calculate_true_range_and_atr(self.df, ATR_PERIOD)
-        
-        required_cols = [f'SMA_{SMA_PERIOD}', f'EMA_{EMA_PERIOD_FAST}', f'EMA_{EMA_PERIOD_QUICK_EXIT}', 'ATR']
-        self.df.dropna(subset=required_cols, inplace=True)
+        self.df.dropna(subset=[f'SMA_{SMA_PERIOD}', f'EMA_{EMA_PERIOD}', 'ATR'], inplace=True)
 
         if self.df.empty: return pd.DataFrame()
 
@@ -253,8 +237,7 @@ class BacktestEngine:
         current_ticker_historical = 'CASH' # Track position dynamically for historical look-back
 
         for index, row in self.df.iterrows():
-            ema_5 = row[f'EMA_{EMA_PERIOD_FAST}']
-            ema_10 = row[f'EMA_{EMA_PERIOD_QUICK_EXIT}']
+            ema_5 = row[f'EMA_{EMA_PERIOD}']
             sma_200 = row[f'SMA_{SMA_PERIOD}']
             atr = row['ATR']
             price = row['close']
@@ -264,22 +247,16 @@ class BacktestEngine:
             if price < vasl_trigger_level:
                 trade_ticker = 'CASH'
             else:
-                # 2. PRIORITY 2: DMA (MODIFIED ENTRY & QUICK EXIT)
+                # 2. PRIORITY 2: DMA (MODIFIED ENTRY)
                 dma_bull_price = (price >= sma_200)
-                dma_bull_ema_confirm = (ema_5 >= sma_200) 
+                dma_bull_ema = (ema_5 >= sma_200) 
                 
                 if dma_bull_price:
-                    # A. TQQQ QUICK EXIT (10-Day EMA Rule)
-                    if price < ema_10 and current_ticker_historical == LEVERAGED_TICKER:
-                        trade_ticker = 'CASH'
-                    
-                    # B. TQQQ ENTRY/HOLD (Strict 5-EMA Confirmation)
-                    elif dma_bull_ema_confirm:
+                    if dma_bull_ema:
+                        # TQQQ ENTRY/HOLD
                         trade_ticker = LEVERAGED_TICKER
-                    
-                    # C. TQQQ LAGGING/ENTRY FILTER FAIL
-                    else: 
-                        # If holding TQQQ, we already checked 10EMA and confirmed we're not below it. HOLD.
+                    else:
+                        # EMA LAGGING: If already in TQQQ, HOLD. Otherwise, CASH (Entry Filter Fails).
                         trade_ticker = LEVERAGED_TICKER if current_ticker_historical == LEVERAGED_TICKER else 'CASH'
                 else: # dma_bull_price is False (Price < 200 SMA)
                     # DMA: BEAR - Check PRIORITY 3
@@ -318,49 +295,54 @@ class BacktestEngine:
                     current_day_prices[t] = Decimal(str(current_day[f'{t}_close']))
             
             # --- 1. HANDLE TRADE SIGNAL CHANGE ---
-            # NOTE: We only log a trade if trade_ticker != current_ticker
             if trade_ticker != current_ticker:
                 
                 # A. SELL (Exit Current Position)
                 if current_ticker != 'CASH':
-                    sell_price = current_day_prices[current_ticker]
+                    # Only sell if the new signal is different or CASH, unless the new signal is TQQQ and we are in TQQQ (in which case, the logic should have kept us there)
                     
-                    # Convert shares back to realized cash
-                    realized_cash = shares * sell_price
-                    
-                    # Log the SELL trade.
-                    trade_history.append({
-                        'Date': current_day.name.date(), 
-                        'Action': f"SELL {current_ticker}", 
-                        'Asset': current_ticker, 
-                        'Price': float(sell_price), 
-                        'Portfolio Value': float(realized_cash) 
-                    })
-                    
-                    # Update portfolio state to CASH.
-                    portfolio_value = realized_cash
-                    shares = Decimal("0")
+                    # If we are holding TQQQ and the new signal is CASH/SQQQ, or we are holding SQQQ and the new signal is CASH/TQQQ:
+                    if trade_ticker != current_ticker: 
+                        sell_price = current_day_prices[current_ticker]
+                        
+                        # Convert shares back to realized cash
+                        realized_cash = shares * sell_price
+                        
+                        # Log the SELL trade.
+                        trade_history.append({
+                            'Date': current_day.name.date(), 
+                            'Action': f"SELL {current_ticker}", 
+                            'Asset': current_ticker, 
+                            'Price': float(sell_price), 
+                            'Portfolio Value': float(realized_cash) 
+                        })
+                        
+                        # Update portfolio state to CASH.
+                        portfolio_value = realized_cash
+                        shares = Decimal("0")
                 
                 # B. BUY (Enter New Position)
                 if trade_ticker != 'CASH':
                     
-                    buy_price = current_day_prices[trade_ticker]
-                    
-                    if buy_price > 0:
-                        # Use the entire CASH amount (portfolio_value) to buy shares
-                        shares = portfolio_value / buy_price
-                    else:
-                        shares = Decimal("0")
-                        portfolio_value = Decimal("0")
+                    # Only buy if we weren't already holding the asset (prevents double logging)
+                    if trade_ticker != current_ticker:
+                        buy_price = current_day_prices[trade_ticker]
                         
-                    # Log the BUY trade.
-                    trade_history.append({
-                        'Date': current_day.name.date(), 
-                        'Action': f"BUY {trade_ticker}", 
-                        'Asset': trade_ticker, 
-                        'Price': float(buy_price), 
-                        'Portfolio Value': float(portfolio_value)
-                    })
+                        if buy_price > 0:
+                            # Use the entire CASH amount (portfolio_value) to buy shares
+                            shares = portfolio_value / buy_price
+                        else:
+                            shares = Decimal("0")
+                            portfolio_value = Decimal("0")
+                            
+                        # Log the BUY trade.
+                        trade_history.append({
+                            'Date': current_day.name.date(), 
+                            'Action': f"BUY {trade_ticker}", 
+                            'Asset': trade_ticker, 
+                            'Price': float(buy_price), 
+                            'Portfolio Value': float(portfolio_value)
+                        })
                         
                 current_ticker = trade_ticker
 
@@ -406,6 +388,7 @@ def run_backtests(full_data, target_date):
         return [], pd.DataFrame() 
 
     last_signal_date = signals_df.index.max().date()
+    # Use the earliest date where indicators are valid for 'Full History' backtest
     start_of_tradable_data = signals_df.index.min().date() 
     start_of_year = datetime(last_signal_date.year, 1, 1).date()
     ytd_start_date = max(start_of_year, start_of_tradable_data) 
@@ -441,7 +424,9 @@ def run_backtests(full_data, target_date):
         final_value, buy_and_hold_qqq, trade_history_df = backtester.run_simulation(first_trade_day)
 
         if label == "Signal Date to Today":
+            # Filter out the 'HOLDING VALUE' row for the main backtest table which only logs trades
             trade_history_for_signal_date = trade_history_df[trade_history_df['Action'] != 'HOLDING VALUE'].copy()
+            # Then add the holding value row back for display purposes
             if trade_history_df['Action'].str.contains('HOLDING VALUE').any():
                  trade_history_for_signal_date = pd.concat([trade_history_for_signal_date, trade_history_df[trade_history_df['Action'] == 'HOLDING VALUE'].copy()], ignore_index=True)
             
@@ -450,16 +435,19 @@ def run_backtests(full_data, target_date):
         bh_profit_loss = buy_and_hold_qqq - initial_float
 
         # --- CAGR CALCULATION ---
-        end_date = last_signal_date
+        end_date = last_signal_date # Use the date of the last signal for calculation
         
+        # Calculate the number of years (using 365.25 for average days per year)
         days_held = (end_date - first_trade_day).days
-        years_held = days_held / 365.25 if days_held > 0 else 1
+        years_held = days_held / 365.25 if days_held > 0 else 1 # Avoid division by zero, use 1 year minimum for CAGR formula if days_held is 0
         
+        # Strategy CAGR
         if final_value > 0 and initial_float > 0 and years_held > 0:
             strategy_cagr = ( (final_value / initial_float) ** (1 / years_held) - 1 ) * 100
         else:
             strategy_cagr = 0.0
 
+        # B&H QQQ CAGR
         if buy_and_hold_qqq > 0 and initial_float > 0 and years_held > 0:
             bh_qqq_cagr = ( (buy_and_hold_qqq / initial_float) ** (1 / years_held) - 1 ) * 100
         else:
@@ -502,42 +490,45 @@ def create_chart(df, indicators):
     ])
 
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[f'SMA_{SMA_PERIOD}'], mode='lines', name=f'{SMA_PERIOD}-Day SMA', line=dict(color='blue', width=2)))
-    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[f'EMA_{EMA_PERIOD_FAST}'], mode='lines', name=f'{EMA_PERIOD_FAST}-Day EMA (Entry/VASL)', line=dict(color='orange', width=1)))
-    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[f'EMA_{EMA_PERIOD_QUICK_EXIT}'], mode='lines', name=f'{EMA_PERIOD_QUICK_EXIT}-Day EMA (Quick Exit)', line=dict(color='yellow', width=1, dash='dot')))
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[f'EMA_{EMA_PERIOD}'], mode='lines', name=f'{EMA_PERIOD}-Day EMA', line=dict(color='orange', width=1)))
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['VASL_Level'], mode='lines', name='VASL Level', line=dict(color='red', width=1, dash='dot')))
 
+    # 1. Marker for the Price/Indicator on the Historical Signal Date
     signal_date = indicators['signal_date']
     signal_price = indicators['signal_price']
     
     signal_date_index = df_plot.index[df_plot.index.date == signal_date].max()
 
     if pd.notna(signal_date_index):
+        # 1a. Add vertical line for the signal date
         fig.add_shape(
             type="line",
             x0=signal_date_index,
             y0=df_plot['low'].min(),
             x1=signal_date_index,
             y1=df_plot['high'].max(),
-            line=dict(color="lime", width=2, dash="dash"),
+            line=dict(color="yellow", width=2, dash="dash"),
             layer="below", 
             name="Signal Date"
         )
         
+        # 1b. Add the marker
         fig.add_trace(go.Scatter(
             x=[signal_date_index], 
             y=[signal_price], 
             mode='markers', 
-            marker=dict(symbol='star', size=12, color='lime', line=dict(width=2, color='black')),
+            marker=dict(symbol='star', size=12, color='yellow', line=dict(width=2, color='black')),
             name=f'Signal Price ({signal_date.strftime("%Y-%m-%d")})'
         ))
 
+    # 2. Marker for the Latest Price (end of the chart)
     latest_price = indicators['final_price']
     last_date = df_plot.index[-1]
     
     fig.add_trace(go.Scatter(
         x=[last_date], y=[latest_price], 
         mode='markers', 
-        marker=dict(symbol='circle', size=10, color='yellow', line=dict(width=2, color='black')),
+        marker=dict(symbol='circle', size=10, color='lime', line=dict(width=2, color='black')),
         name='Latest Close Price'
     ))
 
@@ -558,7 +549,7 @@ def display_app():
     
     st.set_page_config(page_title="TQQQ/SQQQ Signal", layout="wide")
     st.title("📈 TQQQ/SQQQ Daily Signal Generator & Full History Backtester")
-    st.markdown("Strategy priority: **1. VASL** $\implies$ **2. DMA** (TQQQ entry requires **5EMA $\ge$ 200SMA** and TQQQ exit if **Price $<$ 10EMA**) $\implies$ **3. Inverse EMA Exit**.")
+    st.markdown("Strategy priority: **1. VASL** $\implies$ **2. DMA** (TQQQ entry requires **5EMA $\ge$ 200SMA**) $\implies$ **3. Inverse EMA Exit**.")
     st.markdown("---")
 
     # 1. Data Fetch 
@@ -595,8 +586,7 @@ def display_app():
         st.header("2. Strategy Parameters")
         st.metric("Ticker", TICKER)
         st.metric("SMA Period (DMA)", f"{SMA_PERIOD} days")
-        st.metric("EMA Period (Entry/SQQQ Exit/VASL Base)", f"{EMA_PERIOD_FAST} days")
-        st.metric("EMA Period (TQQQ Quick Exit)", f"{EMA_PERIOD_QUICK_EXIT} days")
+        st.metric("EMA Period (VASL/Exit)", f"{EMA_PERIOD} days")
         st.metric("ATR Period (VASL)", f"{ATR_PERIOD} days")
         st.metric("ATR Multiplier (VASL)", ATR_MULTIPLIER)
         st.metric("Backtest Capital", f"${float(INITIAL_INVESTMENT):,.2f}")
@@ -624,6 +614,7 @@ def display_app():
     # 3. Calculate and Generate Signal
     try:
         indicators, data_with_indicators = calculate_indicators(data_for_backtest, target_date, final_signal_price)
+        # For the final signal, we assume we are not holding anything if testing an arbitrary date
         final_signal, trade_ticker, conviction_status, vasl_trigger_level = generate_signal(indicators) 
     except ValueError as e: 
         st.error(f"FATAL ERROR: {e}")
@@ -650,12 +641,11 @@ def display_app():
     col3.metric("DMA Conviction", conviction_status.split('(')[0].strip()) 
 
     st.subheader("Volatility Stop-Loss (VASL) Details")
-    col_ema_10, col_vasl_level = st.columns(2)
-    col_ema_10.metric(f"{EMA_PERIOD_FAST}-Day EMA (Entry/Exit Base)", f"${indicators['ema_5']:.2f}")
-    col_ema_10.metric(f"{EMA_PERIOD_QUICK_EXIT}-Day EMA (TQQQ Exit)", f"${indicators['ema_10']:.2f}")
+    col_vasl_level, col_vasl_status = st.columns(2)
+    col_vasl_level.metric("5-Day EMA", f"${indicators['ema_5']:.2f}")
     col_vasl_level.metric("14-Day ATR", f"${indicators['atr']:.2f}")
     
-    level_format = col_vasl_level.error if "VASL Triggered" in conviction_status else col_vasl_level.success
+    level_format = col_vasl_status.error if "VASL Triggered" in conviction_status else col_vasl_status.success
     level_format(f"**VASL Trigger Level:** ${vasl_trigger_level:.2f}")
 
     st.markdown("---")
@@ -663,15 +653,18 @@ def display_app():
     # --- 6. Display Results: INTERACTIVE CHART ---
     st.header("📈 Interactive Indicator Chart")
     
+    # Fetch 400 days to ensure 200-day SMA is calculated for the visible 200-day range
     chart_data = data_for_backtest.iloc[-400:].copy() 
     
     if not chart_data.empty:
+        # Recalculate indicators on the full visible range for accurate display
         chart_data.ta.sma(length=SMA_PERIOD, append=True)
-        chart_data.ta.ema(length=EMA_PERIOD_FAST, append=True)
-        chart_data.ta.ema(length=EMA_PERIOD_QUICK_EXIT, close='close', append=True)
+        chart_data.ta.ema(length=EMA_PERIOD, append=True)
+        # Use the float-based helper for the chart data
         chart_data['ATR'] = calculate_true_range_and_atr_for_chart(chart_data, ATR_PERIOD)
-        chart_data['VASL_Level'] = chart_data[f'EMA_{EMA_PERIOD_FAST}'] - (ATR_MULTIPLIER * chart_data['ATR'])
+        chart_data['VASL_Level'] = chart_data[f'EMA_{EMA_PERIOD}'] - (ATR_MULTIPLIER * chart_data['ATR'])
         
+        # Only display the last 200 trading days
         chart_data = chart_data.iloc[-200:].dropna(subset=[f'SMA_{SMA_PERIOD}'])
 
         chart_indicators = {
@@ -692,7 +685,7 @@ def display_app():
     
     # --- 7. Display Results: AGGREGATE BACKTESTING ---
     st.header("⏱️ Backtest Performance (vs. QQQ Buy & Hold)")
-    st.markdown(f"**Simulation:** ${float(INITIAL_INVESTMENT):,.2f} initial investment traded based on historical daily signals (Strict 5EMA entry confirmation).")
+    st.markdown(f"**Simulation:** ${float(INITIAL_INVESTMENT):,.2f} initial investment traded based on historical daily signals (Refined 5EMA confirmation for TQQQ entry only).")
 
     if backtest_results:
         df_results = pd.DataFrame(backtest_results)
@@ -701,11 +694,13 @@ def display_app():
         df_results['P/L'] = df_results['P/L'].map(lambda x: f"{'+' if x >= 0 else ''}${x:,.2f}")
         df_results['B&H P/L'] = df_results['B&H P/L'].map(lambda x: f"{'+' if x >= 0 else ''}${x:,.2f}")
         
+        # Format the new CAGR columns
         df_results['Strategy CAGR'] = df_results['Strategy CAGR'].map(lambda x: f"{'+' if x >= 0 else ''}{x:,.2f}%")
         df_results['B&H CAGR'] = df_results['B&H CAGR'].map(lambda x: f"{'+' if x >= 0 else ''}{x:,.2f}%")
         
         df_results = df_results.rename(columns={"B&H QQQ Value": "B&H Value", "B&H P/L": "B&H P/L", "Initial Trade": "First Trade"})
         
+        # Updated column order to include CAGR
         column_order = ["Timeframe", "Start Date", "First Trade", "Strategy Value", "Strategy CAGR", "B&H Value", "B&H CAGR"]
         df_results = df_results[column_order]
         st.dataframe(df_results, hide_index=True)
@@ -717,9 +712,11 @@ def display_app():
     
     if not trade_history_df.empty:
         
+        # Apply formatting
         trade_history_df['Price'] = trade_history_df['Price'].map('${:,.2f}'.format)
         trade_history_df['Portfolio Value'] = trade_history_df['Portfolio Value'].map('${:,.2f}'.format)
         
+        # Display the dataframe without custom row styling
         st.dataframe(
             trade_history_df, 
             column_config={
