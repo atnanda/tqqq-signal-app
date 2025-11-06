@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 import warnings
 import streamlit as st
 import numpy as np
+import plotly.graph_objects as go # New import for charting
 
 # Suppress warnings
 warnings.filterwarnings("ignore")
@@ -29,15 +30,10 @@ if 'override_price' not in st.session_state:
 def fetch_historical_data(target_date, lookback_days=400):
     """
     Fetches historical data for QQQ, TQQQ, and SQQQ, and ensures the required 
-    prefixed columns ('QQQ_close', 'TQQQ_close', 'SQQQ_close') and 
-    simple columns ('close', 'high', 'low') are present.
+    prefixed columns and simple columns ('close', 'high', 'low') are present.
     """
-    # yfinance fetches data up to, but not including, the 'end' date. 
-    # Adding a day ensures we get data for the target_date.
     market_end_date = target_date + timedelta(days=1) 
     start_date = target_date - timedelta(days=lookback_days)
-    
-    # st.info(f"Fetching historical data for {TICKER}, {LEVERAGED_TICKER}, {INVERSE_TICKER} up to {target_date.strftime('%Y-%m-%d')}...")
     
     try:
         tickers = [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]
@@ -48,7 +44,7 @@ def fetch_historical_data(target_date, lookback_days=400):
             end=market_end_date, 
             interval="1d", 
             progress=False,
-            auto_adjust=False, # We handle Adjusted Close explicitly
+            auto_adjust=False,
             timeout=15 
         )
         
@@ -56,45 +52,30 @@ def fetch_historical_data(target_date, lookback_days=400):
             st.error("yfinance returned an empty dataset. Check tickers and date range.")
             return pd.DataFrame()
 
-        # --- 1. Flatten MultiIndex and Consolidate Prices ---
         df_combined = pd.DataFrame(index=all_data.index)
         
-        # Iterate through the required columns and tickers
         for ticker in tickers:
-            # 1a. Prioritize Adjusted Close for all tickers
             close_col_name = f"{ticker}_close"
             if ('Adj Close', ticker) in all_data.columns:
                 df_combined[close_col_name] = all_data['Adj Close'][ticker]
             elif ('Close', ticker) in all_data.columns:
-                # Fallback to non-adjusted Close 
                 df_combined[close_col_name] = all_data['Close'][ticker]
-            
-            # 1b. Get OHLCV data for QQQ (needed for indicator calculation)
+                
             if ticker == TICKER:
                 for metric in ['Open', 'High', 'Low', 'Volume']:
                     if (metric, ticker) in all_data.columns:
                         df_combined[metric.lower()] = all_data[metric][ticker]
         
-        # --- 2. Create Simple QQQ Columns for Indicators ---
-        # The generic 'close' is used by pandas_ta for indicator calculation
         if f'{TICKER}_close' in df_combined.columns:
             df_combined['close'] = df_combined[f'{TICKER}_close']
             
-        # --- 3. Final Validation and Cleanup ---
-        
         required_cols = ['high', 'low', 'close', f'{LEVERAGED_TICKER}_close', f'{INVERSE_TICKER}_close']
         df_combined.dropna(subset=required_cols, inplace=True)
-
-        missing_qqq_cols = [c for c in ['high', 'low', 'close'] if c not in df_combined.columns]
-        if missing_qqq_cols:
-             st.error(f"Data cleaning failed: Missing QQQ OHLC columns {missing_qqq_cols}.")
-             return pd.DataFrame()
 
         if df_combined.shape[0] < SMA_PERIOD:
             st.error(f"FATAL ERROR: Insufficient clean data ({df_combined.shape[0]} rows) to calculate {SMA_PERIOD}-Day SMA.")
             return pd.DataFrame() 
             
-        # Filter data to only include dates up to the target date
         return df_combined[df_combined.index.date <= target_date]
 
     except Exception as e:
@@ -114,14 +95,17 @@ def calculate_true_range_and_atr(df, atr_period):
                                'hpc': high_minus_prev_close, 
                                'lpc': low_minus_prev_close}).max(axis=1)
     
-    # Use EWM (Exponential Weighted Moving Average) for ATR calculation
     atr_series = true_range.ewm(span=atr_period, adjust=False, min_periods=atr_period).mean()
     
     latest_atr = atr_series.ffill().iloc[-1]
 
     if pd.isna(latest_atr) or not np.isfinite(latest_atr):
-         raise ValueError("Manual ATR calculation failed to yield a finite value.")
-         
+        # Fallback to the last valid value if the very last one is NaN
+        latest_atr = atr_series.ffill().iloc[-2]
+
+    if pd.isna(latest_atr) or not np.isfinite(latest_atr):
+        raise ValueError("Manual ATR calculation failed to yield a finite value.")
+            
     return latest_atr
 
 # --- Calculation and Signal Functions ---
@@ -149,13 +133,15 @@ def calculate_indicators(data_daily, current_price):
     if not all(np.isfinite([current_sma_200, latest_ema_5, latest_atr])):
         raise ValueError("Indicator calculation resulted in infinite or non-numeric values.")
 
+    # Return the full DataFrame along with indicators for charting later
+    df['VASL_Level'] = df[f'EMA_{EMA_PERIOD}'] - (ATR_MULTIPLIER * df['ATR'])
+    
     return {
         'current_price': current_price,
         'sma_200': current_sma_200,
         'ema_5': latest_ema_5,
         'atr': latest_atr
-    }
-
+    }, df
 
 def generate_signal(indicators):
     """Applies the defined trading strategy logic: VASL and DMA."""
@@ -170,22 +156,21 @@ def generate_signal(indicators):
     if price < vasl_trigger_level:
         final_signal = "**SELL TQQQ / CASH (Exit)**"
         trade_ticker = 'CASH'
-        conviction_status = "VASL Triggered"
+        conviction_status = "VASL Triggered - Move to CASH"
     else:
         # --- 2. Conviction Filter (DMA) ---
         dma_bull = (price >= sma_200)
         
         if dma_bull:
-            conviction_status = "DMA - Bull (LONG TQQQ Default)"
+            conviction_status = "DMA - Bull (LONG TQQQ)"
             final_signal = "**BUY TQQQ**"
             trade_ticker = LEVERAGED_TICKER
         else:
-            conviction_status = "DMA - Bear (CASH/SQQQ Default)"
+            conviction_status = "DMA - Bear (BUY SQQQ)"
             final_signal = "**BUY SQQQ**"
             trade_ticker = INVERSE_TICKER
 
     return final_signal, trade_ticker, conviction_status, vasl_trigger_level
-
 
 # --- Backtesting Engine ---
 
@@ -209,7 +194,7 @@ class BacktestEngine:
         true_range = pd.DataFrame({'hl': high_minus_low, 'hpc': high_minus_prev_close, 'lpc': low_minus_prev_close}).max(axis=1)
         self.df['ATR'] = true_range.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean()
         
-        # Drop initial NaNs created by indicators. This sets the first tradable day.
+        # Drop initial NaNs created by indicators.
         self.df.dropna(subset=[f'SMA_{SMA_PERIOD}', f'EMA_{EMA_PERIOD}', 'ATR'], inplace=True)
 
         if self.df.empty:
@@ -221,7 +206,7 @@ class BacktestEngine:
             ema_5 = row[f'EMA_{EMA_PERIOD}']
             sma_200 = row[f'SMA_{SMA_PERIOD}']
             atr = row['ATR']
-            price = row['close'] # This is QQQ's adjusted close
+            price = row['close']
             
             vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)
             
@@ -239,7 +224,6 @@ class BacktestEngine:
     def run_simulation(self, start_date):
         """Runs the $10k simulation from the start date to the end of the data."""
         
-        # Filter by date (index.date is used for comparison with the start_date which is a date object)
         sim_df = self.df[self.df.index.date >= start_date].copy()
         
         if sim_df.empty:
@@ -257,23 +241,26 @@ class BacktestEngine:
             
             # --- 1. Rebalance (Sell Old, Buy New) ---
             if trade_ticker != current_ticker:
-                # Sell current position for CASH (using today's closing price)
+                # Sell current position for CASH
                 if current_ticker != 'CASH':
                     sell_price_col = f'{current_ticker}_close'
                     portfolio_value = shares * current_day[sell_price_col] 
                     shares = 0
                 
-                # Buy new position (using today's closing price)
+                # Buy new position
                 if trade_ticker != 'CASH':
                     buy_price_col = f'{trade_ticker}_close'
-                    shares = portfolio_value / current_day[buy_price_col]
-                    # Update value after purchase (shares are held)
-                    portfolio_value = shares * current_day[buy_price_col] 
+                    # Handle division by zero for safety, although unlikely with Adjusted Close
+                    if current_day[buy_price_col] > 0:
+                        shares = portfolio_value / current_day[buy_price_col]
+                        portfolio_value = shares * current_day[buy_price_col]
+                    else:
+                        shares = 0
+                        portfolio_value = 0 # Safety kill if price is zero
                 
                 current_ticker = trade_ticker
 
             # --- 2. Track Value ---
-            # If still holding shares, update portfolio value based on today's close
             if shares > 0:
                 current_price_col = f'{current_ticker}_close'
                 portfolio_value = shares * current_day[current_price_col]
@@ -299,16 +286,9 @@ def run_backtests(full_data, target_date):
         st.error("Backtest failed: Could not generate historical signals.")
         return []
 
-    # 'today' is a datetime.date object from the st.date_input
     today = target_date 
-    
-    # Get the actual earliest tradable day from the cleaned data
     start_of_tradable_data = signals_df.index.min().date() 
-    
-    # Set YTD start date to Jan 1
     start_of_year = datetime(today.year, 1, 1).date()
-    
-    # Use the later date between Jan 1 and the first tradable day
     ytd_start_date = max(start_of_year, start_of_tradable_data) 
     
     three_months_back = (today - timedelta(days=90))
@@ -316,7 +296,6 @@ def run_backtests(full_data, target_date):
     one_day_back = (today - timedelta(days=1))
 
     timeframes = [
-        # Use the mathematically correct start date but update the label to reflect the constraint.
         ("YTD (Since First Valid Signal)", ytd_start_date),
         ("3 Months Back", three_months_back),
         ("1 Week Back", one_week_back),
@@ -327,10 +306,9 @@ def run_backtests(full_data, target_date):
     
     for label, start_date in timeframes:
         if start_date >= today:
-             results.append({"Timeframe": label, "Start Date": start_of_year.strftime('%Y-%m-%d'), "Strategy Value": INITIAL_INVESTMENT, "B&H QQQ Value": INITIAL_INVESTMENT, "P/L": 0.0, "B&H P/L": 0.0})
-             continue
-             
-        # Use the calculated start_date (which for YTD is the first valid signal day)
+            results.append({"Timeframe": label, "Start Date": start_of_year.strftime('%Y-%m-%d'), "Strategy Value": INITIAL_INVESTMENT, "B&H QQQ Value": INITIAL_INVESTMENT, "P/L": 0.0, "B&H P/L": 0.0})
+            continue
+            
         relevant_dates = signals_df.index[signals_df.index.date >= start_date]
         first_trade_day = relevant_dates.min().date() if not relevant_dates.empty else None
 
@@ -354,12 +332,84 @@ def run_backtests(full_data, target_date):
         
     return results
 
+# --- Plotly Charting Function ---
+
+def create_chart(df, indicators):
+    """Creates a Plotly candlestick chart with indicators (SMA, EMA, VASL)."""
+    
+    # Ensure the required indicator columns are present (SMA_200, EMA_5, VASL_Level)
+    ema_col = f'EMA_{EMA_PERIOD}'
+    
+    # We use a 200-day subset for clarity, but need enough data for the indicators to plot cleanly
+    df_plot = df.iloc[-200:].copy() 
+    
+    fig = go.Figure(data=[
+        # Candlestick
+        go.Candlestick(
+            x=df_plot.index,
+            open=df_plot['open'],
+            high=df_plot['high'],
+            low=df_plot['low'],
+            close=df_plot['close'],
+            name=TICKER
+        )
+    ])
+
+    # 200-Day SMA
+    fig.add_trace(go.Scatter(
+        x=df_plot.index, 
+        y=df_plot[f'SMA_{SMA_PERIOD}'], 
+        mode='lines', 
+        name=f'{SMA_PERIOD}-Day SMA',
+        line=dict(color='blue', width=2)
+    ))
+
+    # 5-Day EMA
+    fig.add_trace(go.Scatter(
+        x=df_plot.index, 
+        y=df_plot[ema_col], 
+        mode='lines', 
+        name=f'{EMA_PERIOD}-Day EMA',
+        line=dict(color='orange', width=1)
+    ))
+
+    # VASL Line
+    fig.add_trace(go.Scatter(
+        x=df_plot.index, 
+        y=df_plot['VASL_Level'], 
+        mode='lines', 
+        name='VASL Level',
+        line=dict(color='red', width=1, dash='dot')
+    ))
+
+    # Add marker for current price
+    current_price = indicators['current_price']
+    last_date = df_plot.index[-1]
+    
+    fig.add_trace(go.Scatter(
+        x=[last_date], y=[current_price], 
+        mode='markers', 
+        marker=dict(symbol='circle', size=10, color='lime', line=dict(width=2, color='black')),
+        name='Signal Price'
+    ))
+
+    # Layout styling
+    fig.update_layout(
+        title=f'{TICKER} - Trading Strategy Indicators (Last ~200 Days)',
+        xaxis_title="Date",
+        yaxis_title="Price (USD)",
+        xaxis_rangeslider_visible=False,
+        height=600,
+        template='plotly_dark'
+    )
+    
+    return fig
+
 # --- Streamlit Application Layout ---
 
 def get_most_recent_trading_day():
     today = datetime.today().date()
     target_date = today
-    # Find the last weekday (Mon-Fri)
     while target_date.weekday() > 4: # 5=Saturday, 6=Sunday
         target_date -= timedelta(days=1)
     return target_date
@@ -385,7 +435,7 @@ def display_app():
         if target_date.weekday() > 4:
             st.error(f"**{target_date.strftime('%Y-%m-%d')} is a weekend.** Please select a trading day.")
             st.stop()
-        
+            
         st.session_state['override_price'] = st.number_input(
             "Optional: Override Signal Price ($)",
             value=None,
@@ -394,11 +444,9 @@ def display_app():
             help="Enter a price here to manually test the strategy at a specific level."
         )
 
-        # --- CRITICAL CACHE CLEAR BUTTON ---
         if st.button("Clear Data Cache & Rerun", help="Click this if the price or indicators look outdated. Forces a fresh download."):
             st.cache_data.clear()
             st.rerun()
-        # --- END CACHE CLEAR BUTTON ---
 
         st.header("2. Strategy Parameters")
         st.metric("Ticker", TICKER)
@@ -420,32 +468,24 @@ def display_app():
 
     # 2. Determine Final Signal Price
     final_signal_price = st.session_state['override_price']
-    
-    # --- HARDENED PRICE SELECTION ---
     qqq_close_col_name = f'{TICKER}_close'
     
     if final_signal_price is None:
         try:
-            # 2a. Explicitly look for the QQQ Adjusted Close for the target date
             price_row = data_for_indicators.loc[data_for_indicators.index.date == target_date]
             
             if not price_row.empty:
                 final_signal_price = price_row[qqq_close_col_name].iloc[0].item()
             else:
-                 # Fallback to the last available price if the exact date is missing (e.g., if market closed late/early)
-                 final_signal_price = data_for_indicators[qqq_close_col_name].iloc[-1].item()
+                final_signal_price = data_for_indicators[qqq_close_col_name].iloc[-1].item()
         
-        except KeyError:
-             st.error(f"FATAL ERROR: Required price column '{qqq_close_col_name}' missing from data.")
-             st.stop()
-        except Exception:
-             st.error(f"FATAL ERROR: Could not find the Adjusted Close price for {target_date.strftime('%Y-%m-%d')} in fetched data.")
-             st.stop()
-    # --- END HARDENED PRICE SELECTION ---
+        except Exception as e:
+            st.error(f"FATAL ERROR: Could not find the Adjusted Close price for the target date. Error: {e}")
+            st.stop()
 
     # 3. Calculate and Generate Signal
     try:
-        indicators = calculate_indicators(data_for_indicators, final_signal_price)
+        indicators, data_with_indicators = calculate_indicators(data_for_indicators, final_signal_price)
         final_signal, trade_ticker, conviction_status, vasl_trigger_level = generate_signal(indicators) 
     except Exception as e:
         st.error(f"FATAL ERROR during indicator calculation or signal generation: {e}")
@@ -458,7 +498,6 @@ def display_app():
     
     st.header(f"Today's Signal based on {TICKER} Price at: {target_date.strftime('%Y-%m-%d')}")
     
-    # Signal Box Display
     if "BUY TQQQ" in final_signal:
         st.success(f"## {final_signal}")
     elif "BUY SQQQ" in final_signal:
@@ -488,17 +527,27 @@ def display_app():
 
     st.markdown("---")
     
-    # --- 6. Display Results: BACKTESTING ---
+    # --- 6. Display Results: INTERACTIVE CHART ---
+    st.header("📈 Interactive Indicator Chart")
+    
+    try:
+        chart_fig = create_chart(data_with_indicators, indicators)
+        st.plotly_chart(chart_fig, use_container_width=True)
+    except Exception as e:
+        st.error(f"Could not generate chart. Please check indicator calculations. Error: {e}")
+
+    st.markdown("---")
+        
+    # --- 7. Display Results: BACKTESTING ---
     st.header("⏱️ Backtest Performance (vs. QQQ Buy & Hold)")
     st.markdown(f"**Simulation:** ${INITIAL_INVESTMENT:,.2f} initial investment traded based on historical daily signals.")
 
     if backtest_results:
-        # Prepare DataFrame for display
         df_results = pd.DataFrame(backtest_results)
         
-        # Format the numbers for readability
         df_results['Strategy Value'] = df_results['Strategy Value'].map('${:,.2f}'.format)
         df_results['B&H QQQ Value'] = df_results['B&H QQQ Value'].map('${:,.2f}'.format)
+        
         df_results['P/L'] = df_results['P/L'].map(lambda x: f"{'+' if x >= 0 else ''}${x:,.2f}")
         df_results['B&H P/L'] = df_results['B&H P/L'].map(lambda x: f"{'+' if x >= 0 else ''}${x:,.2f}")
         
