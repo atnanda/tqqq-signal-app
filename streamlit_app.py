@@ -175,7 +175,7 @@ def calculate_indicators(data_daily, target_date, current_price):
 
 def generate_signal(indicators, current_holding_ticker=None):
     """
-    Applies the refined trading strategy logic.
+    Applies the refined trading strategy logic, including the Mini-VASL exit.
     """
     price = indicators['current_price']
     sma_200 = indicators['sma_200']
@@ -183,6 +183,7 @@ def generate_signal(indicators, current_holding_ticker=None):
     atr = indicators['atr']
 
     vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)
+    mini_vasl_exit_level = ema_5 - (0.5 * atr) # New Mini-VASL level
     
     # 1. PRIORITY 1: VASL (Volatility Stop-Loss)
     if price < vasl_trigger_level:
@@ -192,29 +193,37 @@ def generate_signal(indicators, current_holding_ticker=None):
     else:
         # 2. PRIORITY 2: DMA (Directional Conviction - with strict TQQQ entry)
         dma_bull_price = (price >= sma_200)
-        dma_bull_ema = (ema_5 >= sma_200) # EMA CONFIRMATION FILTER
         
         if dma_bull_price:
             # Price is Bullish (Above 200-SMA)
             
-            if dma_bull_ema:
-                # DMA: BULL (Price AND EMA confirm momentum) -> ENTRY/HOLD TQQQ
-                conviction_status = "DMA - Bull (LONG TQQQ confirmed by 5EMA)"
-                final_signal = "**BUY TQQQ**"
-                trade_ticker = LEVERAGED_TICKER
+            # **NEW RULE: Mini-VASL Exit (DMA Bull, but price drops near 5-EMA minus 0.5*ATR)**
+            if current_holding_ticker == LEVERAGED_TICKER and price < mini_vasl_exit_level:
+                 final_signal = "**SELL TQQQ / CASH (Mini-VASL Exit Triggered)**"
+                 trade_ticker = 'CASH'
+                 conviction_status = "Mini-VASL Triggered - Exiting TQQQ position"
             else:
-                # DMA: Neutral (Price is bull, but 5EMA is lagging 200SMA)
+                # Continue with original DMA Bull logic if Mini-VASL is NOT triggered or not holding TQQQ
+                dma_bull_ema = (ema_5 >= sma_200) # EMA CONFIRMATION FILTER
                 
-                if current_holding_ticker == LEVERAGED_TICKER:
-                    # RETAIN: If already in TQQQ, this condition (EMA lag) is NOT an exit rule.
-                    conviction_status = "DMA - Hold TQQQ (Price Bullish, EMA lagging but not exit condition)"
-                    final_signal = "**HOLD TQQQ**"
+                if dma_bull_ema:
+                    # DMA: BULL (Price AND EMA confirm momentum) -> ENTRY/HOLD TQQQ
+                    conviction_status = "DMA - Bull (LONG TQQQ confirmed by 5EMA)"
+                    final_signal = "**BUY TQQQ**"
                     trade_ticker = LEVERAGED_TICKER
                 else:
-                    # CASH: If not in TQQQ, the strict entry rule fails.
-                    conviction_status = "DMA - Neutral (TQQQ Entry Filter Failed: 5EMA lagging)"
-                    final_signal = "**CASH (TQQQ Entry Filter Failed)**"
-                    trade_ticker = 'CASH'
+                    # DMA: Neutral (Price is bull, but 5EMA is lagging 200SMA)
+                    
+                    if current_holding_ticker == LEVERAGED_TICKER:
+                        # RETAIN: If already in TQQQ, this condition (EMA lag) is NOT an exit rule.
+                        conviction_status = "DMA - Hold TQQQ (Price Bullish, EMA lagging but not exit condition)"
+                        final_signal = "**HOLD TQQQ**"
+                        trade_ticker = LEVERAGED_TICKER
+                    else:
+                        # CASH: If not in TQQQ, the strict entry rule fails.
+                        conviction_status = "DMA - Neutral (TQQQ Entry Filter Failed: 5EMA lagging)"
+                        final_signal = "**CASH (TQQQ Entry Filter Failed)**"
+                        trade_ticker = 'CASH'
         else: # dma_bull_price is False (Price < 200 SMA)
             # DMA: BEAR - Check PRIORITY 3
             
@@ -288,15 +297,24 @@ class BacktestEngine:
             else:
                 # 2. PRIORITY 2: DMA (MODIFIED ENTRY)
                 dma_bull_price = (price >= sma_200)
-                dma_bull_ema = (ema_5 >= sma_200) 
                 
                 if dma_bull_price:
-                    if dma_bull_ema:
-                        # TQQQ ENTRY/HOLD
-                        trade_ticker = LEVERAGED_TICKER
+                    # --- START DMA BULL REGIME ---
+                    
+                    # **NEW RULE: Mini-VASL Exit (Only if holding TQQQ)**
+                    mini_vasl_exit_level = ema_5 - (0.5 * atr)
+                    if current_ticker_historical == LEVERAGED_TICKER and price < mini_vasl_exit_level:
+                         trade_ticker = 'CASH'
                     else:
-                        # EMA LAGGING: If already in TQQQ, HOLD. Otherwise, CASH (Entry Filter Fails).
-                        trade_ticker = LEVERAGED_TICKER if current_ticker_historical == LEVERAGED_TICKER else 'CASH'
+                        # Continue with original DMA Bull logic
+                        dma_bull_ema = (ema_5 >= sma_200) 
+                        
+                        if dma_bull_ema:
+                            # TQQQ ENTRY/HOLD
+                            trade_ticker = LEVERAGED_TICKER
+                        else:
+                            # EMA LAGGING: If already in TQQQ, HOLD. Otherwise, CASH.
+                            trade_ticker = LEVERAGED_TICKER if current_ticker_historical == LEVERAGED_TICKER else 'CASH'
                 else: # dma_bull_price is False (Price < 200 SMA)
                     # DMA: BEAR - Check PRIORITY 3
                     
@@ -607,7 +625,7 @@ def display_app():
     
     st.set_page_config(page_title="TQQQ/SQQQ Signal", layout="wide")
     st.title("📈 TQQQ/SQQQ Daily Signal Generator & Full History Backtester")
-    st.markdown("Strategy priority: **1. VASL** $\implies$ **2. DMA** (TQQQ entry requires **5EMA $\ge$ 200SMA**) $\implies$ **3. Inverse EMA Exit**.")
+    st.markdown("Strategy priority: **1. VASL** $\implies$ **2. DMA** (TQQQ exit via **Mini-VASL**) $\implies$ **3. Inverse EMA Exit**.")
     st.markdown("---")
 
     # 1. Data Fetch 
@@ -721,7 +739,7 @@ def display_app():
     col_vasl_level.metric("5-Day EMA", f"${indicators['ema_5']:.2f}")
     col_vasl_level.metric("14-Day ATR", f"${indicators['atr']:.2f}")
     
-    level_format = col_vasl_status.error if "VASL Triggered" in conviction_status else col_vasl_status.success
+    level_format = col_vasl_status.error if "VASL Triggered" in conviction_status or "Mini-VASL Triggered" in conviction_status else col_vasl_status.success
     level_format(f"**VASL Trigger Level:** ${vasl_trigger_level:.2f}")
 
     st.markdown("---")
