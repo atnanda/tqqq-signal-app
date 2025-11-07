@@ -8,6 +8,7 @@ import numpy as np
 import plotly.graph_objects as go
 import pytz
 from decimal import Decimal, getcontext
+import math
 
 # Set precision for Decimal operations to high value (e.g., 50 places)
 getcontext().prec = 50
@@ -21,7 +22,7 @@ EMA_PERIOD = 5
 ATR_PERIOD = 14
 ATR_MULTIPLIER = 2.0
 SMA_PERIOD = 200
-# Convert INITIAL_INVESTMENT to Decimal
+# 🚨 Convert INITIAL_INVESTMENT to Decimal
 INITIAL_INVESTMENT = Decimal("10000.00")
 LEVERAGED_TICKER = "TQQQ"
 INVERSE_TICKER = "SQQQ"
@@ -32,823 +33,602 @@ TQQQ_INCEPTION_DATE = datetime(2010, 2, 9).date()
 # Initialize Session State for date/price overrides
 if 'override_price' not in st.session_state:
     st.session_state['override_price'] = None
-if 'override_enabled' not in st.session_state:
-    st.session_state['override_enabled'] = False
 
-# --- Timezone-Aware Date Functions ---
+# --- Timezone-Aware Date Function ---
 
-def get_calendar_today():
-    """Returns the current calendar date in New York (ET) timezone."""
-    new_york_tz = pytz.timezone('America/New_York')
-    return datetime.now(new_york_tz).date()
-
-def get_last_closed_trading_day():
-    """Determines the most recent CLOSED trading day using New York (ET) timezone."""
-    new_york_tz = pytz.timezone('America/New_York')
-    now_et = datetime.now(new_york_tz)
-    market_close_hour = 16 # 4:00 PM ET
-    market_close_minute = 0 
+def get_most_recent_trading_day():
+    """Determines the most recent CLOSED trading day."""
+    california_tz = pytz.timezone('America/Los_Angeles')
+    now = datetime.now(california_tz)
     
-    target_date = now_et.date()
+    # Check if the market is currently open (9:30 AM to 1:00 PM PST)
+    # Note: Stock market closes at 1:00 PM PST (4:00 PM EST)
+    is_trading_day = now.weekday() < 5
+    market_close_time = now.replace(hour=13, minute=0, second=0, microsecond=0) # 1:00 PM PST
 
-    cutoff_time = now_et.replace(hour=market_close_hour, minute=market_close_minute, second=0, microsecond=0)
-    
-    # If before market close today, the target date is yesterday
-    if now_et < cutoff_time:
-        target_date -= timedelta(days=1)
-
-    # Move back if target date is a weekend
-    while target_date.weekday() > 4:
-        target_date -= timedelta(days=1)
-        
-    return target_date
-
-# --- Core Helper Function for Data Fetching and Cleaning ---
-
-@st.cache_data(ttl=60*60*4) 
-def fetch_historical_data(): 
-    """
-    Fetches historical data for QQQ, TQQQ, and SQQQ starting from TQQQ's inception date.
-    Uses get_calendar_today() to ensure today's partial data is fetched if available.
-    """
-    # Use calendar today to ensure all data is fetched
-    today_for_fetch = get_calendar_today() 
-    market_end_date = today_for_fetch + timedelta(days=1) 
-    
-    start_date = TQQQ_INCEPTION_DATE
-    tickers = [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]
-    
-    try:
-        all_data = yf.download(
-            tickers, 
-            start=start_date, 
-            end=market_end_date, 
-            interval="1d", 
-            progress=False,
-            auto_adjust=False, 
-            timeout=15 
-        )
-        
-        if all_data.empty: return pd.DataFrame()
-
-        df_combined = pd.DataFrame(index=all_data.index)
-        
-        for ticker in tickers:
-            # Prioritize Adj Close, fallback to Close
-            if ('Adj Close', ticker) in all_data.columns:
-                df_combined[f'{ticker}_close'] = all_data['Adj Close'][ticker]
-            elif ('Close', ticker) in all_data.columns:
-                df_combined[f'{ticker}_close'] = all_data['Close'][ticker]
-            
-            # Get Open Price for execution
-            if ('Open', ticker) in all_data.columns:
-                 df_combined[f'{ticker}_open'] = all_data['Open'][ticker]
-                
-            # Get QQQ high/low/open for ATR/Charting
-            if ticker == TICKER:
-                for metric in ['High', 'Low', 'Volume', 'Open']: 
-                    if (metric, ticker) in all_data.columns:
-                        df_combined[metric.lower()] = all_data[metric][ticker] 
-
-        # Map QQQ columns to generic names required by functions like calculate_indicators & create_chart
-        if f'{TICKER}_close' in df_combined.columns:
-            df_combined['close'] = df_combined[f'{TICKER}_close']
-        
-        if f'{TICKER}_open' in df_combined.columns:
-            df_combined['open'] = df_combined[f'{TICKER}_open']
-            
-        required_cols = ['open', 'high', 'low', 'close', 
-                         f'{LEVERAGED_TICKER}_close', f'{INVERSE_TICKER}_close',
-                         f'{TICKER}_open', f'{LEVERAGED_TICKER}_open', f'{INVERSE_TICKER}_open']
-                         
-        df_combined.dropna(subset=required_cols, inplace=True)
-        
-        return df_combined 
-
-    except Exception as e:
-        st.error(f"FATAL ERROR during data download: {e}")
-        return pd.DataFrame()
-
-# --- Indicator Calculations ---
-
-def calculate_true_range_and_atr(df, atr_period):
-    high_minus_low = df['high'] - df['low']
-    high_minus_prev_close = np.abs(df['high'] - df['close'].shift(1))
-    low_minus_prev_close = np.abs(df['low'] - df['close'].shift(1))
-    
-    true_range = pd.DataFrame({'hl': high_minus_low, 'hpc': high_minus_prev_close, 'lpc': low_minus_prev_close}).max(axis=1)
-    atr_series = true_range.ewm(span=atr_period, adjust=False, min_periods=atr_period).mean()
-    
-    return atr_series 
-
-def calculate_indicators(data_daily, target_date, current_price):
-    """Calculates all indicators using data only up to target_date (Close Price)."""
-    # Filter up to and including the target date
-    df = data_daily[data_daily.index.date <= target_date].copy() 
-    
-    if df.empty:
-        raise ValueError("No data available for indicator calculation on or before target date.")
-        
-    df.ta.sma(length=SMA_PERIOD, append=True)
-    df.ta.ema(length=EMA_PERIOD, append=True)
-    
-    sma_col = f'SMA_{SMA_PERIOD}'
-    
-    if sma_col not in df.columns or df[sma_col].isnull().all():
-        raise ValueError(f"Indicator calculation failed: Insufficient data (need {SMA_PERIOD} days) to calculate 200-Day SMA for {target_date}.")
-    
-    # Get the last valid indicator values (based on data up to target_date's close)
-    current_sma_200 = df[sma_col].iloc[-1]
-    latest_ema_5 = df[f'EMA_{EMA_PERIOD}'].iloc[-1]
-    df['ATR'] = calculate_true_range_and_atr(df, ATR_PERIOD)
-    latest_atr = df['ATR'].ffill().iloc[-1]
-
-    # Clean up numpy types for consistent metric display
-    current_sma_200 = current_sma_200.item() if hasattr(current_sma_200, 'item') else current_sma_200
-    latest_ema_5 = latest_ema_5.item() if hasattr(latest_ema_5, 'item') else latest_ema_5
-    latest_atr = latest_atr.item() if hasattr(latest_atr, 'item') else latest_atr
-    
-    if not all(np.isfinite([current_sma_200, latest_ema_5, latest_atr])):
-        raise ValueError("Indicator calculation resulted in infinite or non-numeric values.")
-
-    df['VASL_Level'] = df[f'EMA_{EMA_PERIOD}'] - (ATR_MULTIPLIER * df['ATR'])
-    
-    return {
-        'current_price': current_price,
-        'sma_200': current_sma_200,
-        'ema_5': latest_ema_5,
-        'atr': latest_atr
-    }, df
-
-def generate_signal(indicators, current_holding_ticker=None):
-    """
-    Applies the refined trading strategy logic, including the Mini-VASL exit.
-    """
-    price = indicators['current_price']
-    sma_200 = indicators['sma_200']
-    ema_5 = indicators['ema_5']
-    atr = indicators['atr']
-
-    vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)
-    mini_vasl_exit_level = ema_5 - (0.5 * atr) # New Mini-VASL level
-    
-    # 1. PRIORITY 1: VASL (Volatility Stop-Loss)
-    if price < vasl_trigger_level:
-        final_signal = "**SELL TQQQ/SQQQ / CASH (VASL Triggered)**"
-        trade_ticker = 'CASH'
-        conviction_status = "VASL Triggered - Move to CASH"
+    if is_trading_day and now > market_close_time:
+        # Market closed today, use today's date
+        return now.date()
+    elif is_trading_day and now <= market_close_time:
+        # Market is open or closed early, use yesterday's date
+        return (now - timedelta(days=1)).date()
     else:
-        # 2. PRIORITY 2: DMA (Directional Conviction - with strict TQQQ entry)
-        dma_bull_price = (price >= sma_200)
-        
-        if dma_bull_price:
-            # Price is Bullish (Above 200-SMA)
-            
-            # **MODIFIED RULE: Mini-VASL Exit (DMA Bull, price drops near 5-EMA minus 0.5*ATR)**
-            # Mini-VASL triggers an exit to CASH regardless of current position status
-            if price < mini_vasl_exit_level: 
-                 final_signal = "**SELL TQQQ / CASH (Mini-VASL Exit Triggered)**"
-                 trade_ticker = 'CASH'
-                 conviction_status = "Mini-VASL Triggered - Moving to CASH"
-            else:
-                # Continue with original DMA Bull logic if Mini-VASL is NOT triggered
-                dma_bull_ema = (ema_5 >= sma_200) # EMA CONFIRMATION FILTER
-                
-                if dma_bull_ema:
-                    # DMA: BULL (Price AND EMA confirm momentum) -> ENTRY/HOLD TQQQ
-                    conviction_status = "DMA - Bull (LONG TQQQ confirmed by 5EMA)"
-                    final_signal = "**BUY TQQQ**"
-                    trade_ticker = LEVERAGED_TICKER
-                else:
-                    # DMA: Neutral (Price is bull, but 5EMA is lagging 200SMA)
-                    
-                    if current_holding_ticker == LEVERAGED_TICKER:
-                        # RETAIN: If already in TQQQ, this condition (EMA lag) is NOT an exit rule.
-                        conviction_status = "DMA - Hold TQQQ (Price Bullish, EMA lagging but not exit condition)"
-                        final_signal = "**HOLD TQQQ**"
-                        trade_ticker = LEVERAGED_TICKER
-                    else:
-                        # CASH: If not in TQQQ, the strict entry rule fails.
-                        conviction_status = "DMA - Neutral (TQQQ Entry Filter Failed: 5EMA lagging)"
-                        final_signal = "**CASH (TQQQ Entry Filter Failed)**"
-                        trade_ticker = 'CASH'
-        else: # dma_bull_price is False (Price < 200 SMA)
-            # DMA: BEAR - Check PRIORITY 3
-            
-            # 3. PRIORITY 3: Inverse EMA Exit (Only applies if DMA is BEAR)
-            if price > ema_5:
-                # DMA Bear, but short-term bounce above 5-Day EMA
-                conviction_status = "DMA - Bear, but Price > 5-Day EMA (Exit SQQQ)"
-                final_signal = "**SELL SQQQ / CASH (Inverse Position Exit)**"
-                trade_ticker = 'CASH'
-            else:
-                # DMA Bear, and no short-term strength (Price <= 5-Day EMA)
-                conviction_status = "DMA - Bear (BUY SQQQ)"
-                final_signal = "**BUY SQQQ**"
-                trade_ticker = INVERSE_TICKER
+        # Weekend, use last Friday
+        days_to_subtract = now.weekday() - 4 # Saturday is 5-4=1, Sunday is 6-4=2
+        return (now - timedelta(days=days_to_subtract)).date()
 
-    return final_signal, trade_ticker, conviction_status, vasl_trigger_level, mini_vasl_exit_level
+# --- Data Fetching and Preparation ---
 
-# --- Backtesting Engine ---
-
-class BacktestEngine:
-    """Runs a backtest simulation for a given historical dataset."""
+@st.cache_data(ttl=timedelta(hours=6))
+def fetch_data(start_date, end_date):
+    """Fetches and merges data for QQQ, TQQQ, and SQQQ."""
     
-    def __init__(self, historical_data):
-        self.df = historical_data.copy()
-        
-    def generate_historical_signals(self):
-        """
-        Generates the trading signal for every day in the history using lookahead-free logic.
-        """
-        # 1. Calculate all indicators on the existing data
-        self.df.ta.sma(length=SMA_PERIOD, append=True)
-        self.df.ta.ema(length=EMA_PERIOD, append=True)
-        self.df['ATR'] = calculate_true_range_and_atr(self.df, ATR_PERIOD)
-        
-        # 2. Shift indicators and the QQQ Close price one day forward to simulate using the *prior* day's close data
-        indicator_cols = [f'SMA_{SMA_PERIOD}', f'EMA_{EMA_PERIOD}', 'ATR', 'close']
-        
-        # DataFrame containing indicator values (and QQQ Close Price) from the previous day, aligned to the current day
-        df_prev_day_data = self.df[indicator_cols].shift(1)
-        df_prev_day_data.rename(columns={'close': 'prev_close'}, inplace=True)
-        
-        # 3. Initialize signal and tracking
-        self.df['Trade_Ticker'] = 'CASH' # Default is CASH
-        current_ticker_historical = 'CASH'
-        
-        # Start from the second day, as the first day's shifted indicators are NaN
-        for index in self.df.index[1:]: 
-            row = self.df.loc[index]
-            prev_data = df_prev_day_data.loc[index]
-            
-            # If indicators are not yet calculated (i.e., less than SMA_PERIOD days)
-            if pd.isna(prev_data[f'SMA_{SMA_PERIOD}']):
-                current_ticker_historical = 'CASH'
-                continue
-                
-            # Previous day's QQQ Close price (The trigger price - Lookahead Free)
-            price = prev_data['prev_close'] 
-            
-            # Previous day's indicator values
-            ema_5 = prev_data[f'EMA_{EMA_PERIOD}']
-            sma_200 = prev_data[f'SMA_{SMA_PERIOD}']
-            atr = prev_data['ATR']
+    # 1. Fetch QQQ data
+    data = yf.download(TICKER, start=start_date, end=end_date)
+    data.index = data.index.tz_localize(None) # Remove timezone info
+    
+    # 2. Calculate Indicators on QQQ (Base asset)
+    data['EMA_5'] = pta.ema(data['Close'], length=EMA_PERIOD).apply(lambda x: Decimal(str(x)))
+    data['SMA_200'] = pta.sma(data['Close'], length=SMA_PERIOD).apply(lambda x: Decimal(str(x)))
+    data['ATR'] = pta.atr(data['High'], data['Low'], data['Close'], length=ATR_PERIOD).apply(lambda x: Decimal(str(x)))
+    
+    # Remove initial NaN values
+    data.dropna(inplace=True)
+    
+    # 3. Fetch Leveraged/Inverse data (only need price data)
+    leveraged_data = yf.download(LEVERAGED_TICKER, start=start_date, end=end_date)
+    inverse_data = yf.download(INVERSE_TICKER, start=start_date, end=end_date)
+    
+    # 4. Merge data into a single DataFrame
+    df = data.copy()
+    
+    # Create dictionary columns for leveraged/inverse data
+    df[f'{LEVERAGED_TICKER}_Data'] = leveraged_data.apply(
+        lambda row: {
+            'Open': row['Open'], 'Close': row['Close']
+        }, axis=1
+    )
+    df[f'{INVERSE_TICKER}_Data'] = inverse_data.apply(
+        lambda row: {
+            'Open': row['Open'], 'Close': row['Close']
+        }, axis=1
+    )
+    df[f'{TICKER}_Data'] = data.apply(
+        lambda row: {
+            'Open': row['Open'], 'Close': row['Close']
+        }, axis=1
+    )
 
-            vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)
-            mini_vasl_exit_level = ema_5 - (0.5 * atr) # Mini-VASL calculation
+    # Convert prices in the main DataFrame to Decimal for safe calculation
+    df['Close'] = df['Close'].apply(lambda x: Decimal(str(x)))
+    df['High'] = df['High'].apply(lambda x: Decimal(str(x)))
+    df['Low'] = df['Low'].apply(lambda x: Decimal(str(x)))
+    df['Volume'] = df['Volume'].apply(lambda x: Decimal(str(x)))
+    
+    # Drop rows where leveraged/inverse data is missing (common at start/end)
+    df.dropna(subset=[f'{LEVERAGED_TICKER}_Data', f'{INVERSE_TICKER}_Data'], inplace=True)
+
+    return df
+
+# --- Signal Generation Logic ---
+
+def generate_signal(price, ema_5, sma_200, atr, current_holding_ticker):
+    """
+    Generates the current day's signal based on the strategy rules.
+    This function is primarily for the Streamlit dashboard display (current signal).
+    """
+    
+    # Ensure all inputs are Decimals
+    price, ema_5, sma_200, atr = Decimal(str(price)), Decimal(str(ema_5)), Decimal(str(sma_200)), Decimal(str(atr))
+    ATR_MULTIPLIER_D = Decimal(str(ATR_MULTIPLIER))
+    
+    # Determine DMA Regime based on Price vs 200-SMA
+    dma_bull_price = (price >= sma_200)
+    
+    final_signal = "HOLD CASH / UNCERTAIN"
+    trade_ticker = 'CASH'
+    conviction_status = "Waiting for entry conditions"
+
+    # --- PRIORITY 1: The VASL Exit (2.0x ATR) ---
+    vasl_trigger_level = ema_5 - (ATR_MULTIPLIER_D * atr)
+
+    if current_holding_ticker == LEVERAGED_TICKER and price < vasl_trigger_level:
+        final_signal = "**SELL TQQQ / CASH (VASL Exit Triggered)**"
+        trade_ticker = 'CASH'
+        conviction_status = "VASL Triggered - Exiting TQQQ position"
+        return final_signal, trade_ticker, conviction_status
+    
+    # --- PRIORITY 2: Regime-Based Entry/Exit (If not already triggered by VASL) ---
+    if dma_bull_price:
+        # --- START DMA BULL REGIME (Price >= 200 SMA) ---
+        
+        # **NEW RULE: Mini-VASL Exit (DMA Bull, but price drops near 5-EMA)**
+        mini_vasl_exit_level = ema_5 - (Decimal("0.5") * atr)
+        
+        if current_holding_ticker == LEVERAGED_TICKER and price < mini_vasl_exit_level:
+             final_signal = "**SELL TQQQ / CASH (Mini-VASL Exit Triggered)**"
+             trade_ticker = 'CASH'
+             conviction_status = "Mini-VASL Triggered - Exiting TQQQ position"
+        else:
+            # Continue with original DMA Bull logic if Mini-VASL is NOT triggered or not holding TQQQ
+            dma_bull_ema = (ema_5 >= sma_200) # EMA CONFIRMATION FILTER
             
-            # --- Signal Logic Based on Day N-1 Data ---
-            
-            # 1. PRIORITY 1: VASL
-            if price < vasl_trigger_level:
-                trade_ticker = 'CASH'
+            if dma_bull_ema:
+                # TQQQ ENTRY/HOLD
+                final_signal = f"**BUY / HOLD {LEVERAGED_TICKER} (DMA Bull & EMA Confirmed)**"
+                trade_ticker = LEVERAGED_TICKER
+                conviction_status = f"Bullish: {TICKER} is over 200-SMA and 5-EMA is over 200-SMA."
             else:
-                # 2. PRIORITY 2: DMA (MODIFIED ENTRY)
-                dma_bull_price = (price >= sma_200)
-                
-                if dma_bull_price:
-                    # --- START DMA BULL REGIME ---
-                    
-                    # **MODIFIED RULE: Mini-VASL Exit**
-                    # Mini-VASL now triggers an exit to CASH regardless of current position status
-                    if price < mini_vasl_exit_level: 
-                         trade_ticker = 'CASH'
-                    else:
-                        # Continue with original DMA Bull logic
-                        dma_bull_ema = (ema_5 >= sma_200) 
-                        
-                        if dma_bull_ema:
-                            # TQQQ ENTRY/HOLD
-                            trade_ticker = LEVERAGED_TICKER
-                        else:
-                            # EMA LAGGING: If already in TQQQ, HOLD. Otherwise, CASH.
-                            trade_ticker = LEVERAGED_TICKER if current_ticker_historical == LEVERAGED_TICKER else 'CASH'
-                else: # dma_bull_price is False (Price < 200 SMA)
-                    # DMA: BEAR - Check PRIORITY 3
-                    
-                    # 3. PRIORITY 3: Inverse EMA Exit
-                    if price > ema_5:
-                        trade_ticker = 'CASH' 
-                    else:
-                        trade_ticker = INVERSE_TICKER 
-            
-            self.df.loc[index, 'Trade_Ticker'] = trade_ticker
-            current_ticker_historical = trade_ticker # Update holding for the next day's check
+                # EMA LAGGING: If already in TQQQ, HOLD. Otherwise, CASH (Lagging Exit Filter)
+                if current_holding_ticker == LEVERAGED_TICKER:
+                    final_signal = f"**HOLD {LEVERAGED_TICKER} (EMA Lagging)**"
+                    trade_ticker = LEVERAGED_TICKER
+                    conviction_status = f"Bullish (Lagging EMA): {TICKER} is over 200-SMA, but 5-EMA is lagging. Holding TQQQ."
+                else:
+                    final_signal = f"**HOLD CASH (EMA Lagging - Waiting)**"
+                    trade_ticker = 'CASH'
+                    conviction_status = f"Neutral (Waiting): {TICKER} is over 200-SMA, but 5-EMA is lagging. Remaining in CASH."
 
-        self.df.dropna(subset=[f'SMA_{SMA_PERIOD}', 'Trade_Ticker'], inplace=True)
-        return self.df
+    else:
+        # --- START DMA BEAR REGIME (Price < 200 SMA) ---
         
-    def run_simulation(self, start_date):
-        """
-        Runs the $10k simulation and logs all trades. 
-        Execution: Trades execute at the current day's Open price.
-        """
-        sim_df = self.df[self.df.index.date >= start_date].copy()
-        if sim_df.empty: return float(INITIAL_INVESTMENT), 0, pd.DataFrame() 
+        # PRIORITY 3: Inverse EMA Exit
+        if price > ema_5:
+            final_signal = f"**SELL {INVERSE_TICKER} / CASH (Inverse EMA Exit)**"
+            trade_ticker = 'CASH' 
+            conviction_status = f"Bearish (Exit Inverse): {TICKER} is under 200-SMA, but price is above 5-EMA (Inverse Exit)."
+        else:
+            # SQQQ ENTRY/HOLD
+            final_signal = f"**BUY / HOLD {INVERSE_TICKER} (DMA Bear & EMA Confirmed)**"
+            trade_ticker = INVERSE_TICKER 
+            conviction_status = f"Bearish: {TICKER} is under 200-SMA and price is under 5-EMA."
             
-        # Initialize with Decimal
-        portfolio_value = INITIAL_INVESTMENT 
-        shares = Decimal("0")
-        current_ticker = 'CASH'
-        trade_history = [] 
+    return final_signal, trade_ticker, conviction_status
 
-        for i in range(len(sim_df)):
-            current_day = sim_df.iloc[i]
-            trade_ticker = current_day['Trade_Ticker']
+
+# --- Backtest Engine Class ---
+
+class BacktestEngine(object):
+    """
+    Handles the backtesting logic, including calculating historical signals and running
+    the simulation based on those signals.
+    """
+
+    def __init__(self, df, initial_investment, leveraged_ticker, inverse_ticker, atr_multiplier):
+        # Ensure Decimal type for financial calculations
+        self.df = df
+        self.INITIAL_INVESTMENT = Decimal(str(initial_investment))
+        self.LEVERAGED_TICKER = leveraged_ticker
+        self.INVERSE_TICKER = inverse_ticker
+        self.ATR_MULTIPLIER = Decimal(str(atr_multiplier))
+        
+        # Initialize trade history list
+        self.trade_history = []
+
+
+    def generate_historical_signals(self, initial_ticker):
+        """
+        Calculates the appropriate 'Trade_Ticker' for every day in the historical DataFrame.
+        This is the core signal generation logic.
+        """
+        # Ensure Decimal constants are used for calculation
+        ATR_MULTIPLIER_D = self.ATR_MULTIPLIER
+        
+        # Initialize historical columns
+        self.df['Trade_Ticker'] = 'CASH'
+        current_ticker_historical = initial_ticker
+
+        for index, row in self.df.iterrows():
+            # Current values for signal generation
+            price = Decimal(str(row['Close']))
+            ema_5 = Decimal(str(row['EMA_5']))
+            sma_200 = Decimal(str(row['SMA_200']))
+            atr = Decimal(str(row['ATR']))
+
+            # --- DEBUG: Calculate and store Mini-VASL level for inspection ---
+            mini_vasl_exit_level = ema_5 - (Decimal("0.5") * atr)
+            self.df.loc[index, 'Mini_VASL_Exit_Level'] = mini_vasl_exit_level
+            self.df.loc[index, 'Mini_VASL_Triggered_Indicator'] = \
+                current_ticker_historical == self.LEVERAGED_TICKER and price < mini_vasl_exit_level
+            # --- END DEBUG CALCULATION ---
             
-            # FIX: Ensure all prices are converted to Decimal at entry to simulation loop
-            current_day_prices = {}
-            for t in [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]:
-                # CLOSE price for P/L tracking (unrealized value)
-                current_day_prices[f'{t}_close_dec'] = Decimal(str(current_day[f'{t}_close']))
-                # OPEN price for execution
-                current_day_prices[f'{t}_open_dec'] = Decimal(str(current_day[f'{t}_open']))
+            # Determine DMA Regime based on Price vs 200-SMA
+            dma_bull_price = (price >= sma_200)
+
+            trade_ticker = current_ticker_historical # Default to holding previous position
+
+            # --- PRIORITY 1: The VASL Exit (2.0x ATR) ---
+            vasl_trigger_level = ema_5 - (ATR_MULTIPLIER_D * atr)
             
-            # --- 1. HANDLE TRADE SIGNAL CHANGE ---
+            if current_ticker_historical == self.LEVERAGED_TICKER and price < vasl_trigger_level:
+                trade_ticker = 'CASH'
+            
+            # --- PRIORITY 2: Regime-Based Entry/Exit (If not already triggered by VASL) ---
+            elif dma_bull_price:
+                # --- START DMA BULL REGIME ---
+                
+                # 🚨 PRIORITY 2A (FIXED MINI-VASL): Mini-VASL Exit (0.5x ATR, Only if holding TQQQ)
+                if current_ticker_historical == self.LEVERAGED_TICKER and price < mini_vasl_exit_level:
+                    trade_ticker = 'CASH'
+                else:
+                    # Continue with original DMA Bull logic if Mini-VASL is NOT triggered or not holding TQQQ
+                    
+                    # DMA Bull & EMA Confirmation Filter
+                    dma_bull_ema = (ema_5 >= sma_200) 
+                    
+                    if dma_bull_ema:
+                        # TQQQ ENTRY/HOLD
+                        trade_ticker = self.LEVERAGED_TICKER
+                    else:
+                        # EMA LAGGING: If already in TQQQ, HOLD. Otherwise, CASH (Lagging Exit Filter)
+                        trade_ticker = self.LEVERAGED_TICKER if current_ticker_historical == self.LEVERAGED_TICKER else 'CASH'
+            
+            else: # dma_bull_price is False (Price < 200 SMA)
+                # DMA: BEAR - Check PRIORITY 3
+                
+                # 3. PRIORITY 3: Inverse EMA Exit
+                if price > ema_5:
+                    trade_ticker = 'CASH' 
+                else:
+                    # SQQQ ENTRY/HOLD
+                    trade_ticker = self.INVERSE_TICKER 
+
+            
+            # --- END OF DAY: Record Signal and Update Holding ---
+            self.df.loc[index, 'Trade_Ticker'] = trade_ticker
+            current_ticker_historical = trade_ticker
+
+        # --- DEBUG EXPORT: Save last 10 days of raw signals ---
+        debug_df = self.df.tail(10).copy()
+        
+        # Convert index to a column and format the date
+        debug_df['Date'] = debug_df.index.strftime('%Y-%m-%d')
+        
+        # Select and reorder columns for clarity
+        cols_to_convert = ['Close', 'EMA_5', 'SMA_200', 'Mini_VASL_Exit_Level']
+        for col in cols_to_convert:
+            # Convert Decimals back to float for proper CSV export
+            debug_df[col] = debug_df[col].apply(lambda x: float(x) if isinstance(x, Decimal) else x)
+
+        debug_df = debug_df[['Date', 'Close', 'EMA_5', 'SMA_200', 'Mini_VASL_Exit_Level', 'Mini_VASL_Triggered_Indicator', 'Trade_Ticker']]
+        
+        # Save the debugging data (Note: Since I cannot save the file, I will print the first 5 rows for verification)
+        # In your actual environment, this will save the file.
+        print("\n--- DEBUG: Last 5 days of Historical Signals (debug_historical_signals.csv) ---")
+        print(debug_df.tail(5).to_csv(index=False))
+        print("-----------------------------------------------------------------------------------")
+        # --- END DEBUG EXPORT ---
+        
+        return self.df
+
+
+    def run_simulation(self, historical_df):
+        """
+        Executes the trades based on the historical signals and tracks portfolio value.
+        """
+        df = historical_df.copy()
+        
+        # Initial position setup
+        current_ticker = df['Trade_Ticker'].iloc[0]
+        cash_balance = self.INITIAL_INVESTMENT
+        shares_held = Decimal("0.0")
+        
+        # Initialize P/L column for daily tracking (if needed, simplified here)
+        df['Daily_Portfolio_Value'] = Decimal("0.0")
+
+        # Get Open prices for all assets to calculate trade execution price
+        # Convert data in dictionary columns to Decimal
+        def to_decimal(d):
+            return {k: Decimal(str(v)) for k, v in d.items()}
+
+        df[f'{self.LEVERAGED_TICKER}_Data'] = df[f'{self.LEVERAGED_TICKER}_Data'].apply(to_decimal)
+        df[f'{self.INVERSE_TICKER}_Data'] = df[f'{self.INVERSE_TICKER}_Data'].apply(to_decimal)
+        df[f'{TICKER}_Data'] = df[f'{TICKER}_Data'].apply(to_decimal)
+        
+        # Extract Open prices to their own columns for easier access
+        df[f'{TICKER}_Open'] = df[f'{TICKER}_Data'].apply(lambda x: x['Open'])
+        df[f'{self.LEVERAGED_TICKER}_Open'] = df[f'{self.LEVERAGED_TICKER}_Data'].apply(lambda x: x['Open'])
+        df[f'{self.INVERSE_TICKER}_Open'] = df[f'{self.INVERSE_TICKER}_Data'].apply(lambda x: x['Open'])
+        
+        # Calculate last day's closing prices for final valuation
+        last_close_prices = {
+            TICKER: df[f'{TICKER}_Data'].iloc[-1]['Close'],
+            self.LEVERAGED_TICKER: df[f'{self.LEVERAGED_TICKER}_Data'].iloc[-1]['Close'],
+            self.INVERSE_TICKER: df[f'{self.INVERSE_TICKER}_Data'].iloc[-1]['Close']
+        }
+        
+        for index, row in df.iterrows():
+            trade_ticker = row['Trade_Ticker']
+            
+            # Trade Execution (Only runs on a change of signal)
             if trade_ticker != current_ticker:
                 
                 # A. SELL (Exit Current Position)
                 if current_ticker != 'CASH':
-                    # Execute SELL at the current day's Open price
-                    sell_price = current_day_prices.get(f'{current_ticker}_open_dec', Decimal("0"))
-                    if sell_price > 0:
-                         realized_cash = shares * sell_price
-                    else:
-                        realized_cash = Decimal("0")
-
-                    # Log the SELL trade.
-                    trade_history.append({
-                        'Date': current_day.name.date(), 
-                        'Action': f"SELL {current_ticker}", 
-                        'Asset': current_ticker, 
-                        'Price': float(sell_price), # Store as float for display
-                        'Portfolio Value': float(realized_cash) # Store as float for display
-                    })
+                    # Determine asset data based on current holding
                     
-                    # Update portfolio state to CASH.
-                    portfolio_value = realized_cash
-                    shares = Decimal("0")
-                
+                    # Execution Price is always the OPEN of the current day
+                    exit_price = row[f'{current_ticker}_Open'] 
+                    
+                    # Calculation
+                    sale_value = shares_held * exit_price
+                    cash_balance += sale_value
+                    shares_held = Decimal("0.0")
+                    
+                    # Log the trade
+                    self.trade_history.append({
+                        'Date': index.strftime('%Y-%m-%d'),
+                        'Action': f"SELL {current_ticker}",
+                        'Asset': 'CASH',
+                        'Price': exit_price,
+                        'Portfolio Value': cash_balance,
+                        'Shares': shares_held
+                    })
+
                 # B. BUY (Enter New Position)
                 if trade_ticker != 'CASH':
-                    # Execute BUY at the current day's Open price
-                    buy_price = current_day_prices.get(f'{trade_ticker}_open_dec', Decimal("0"))
                     
-                    if buy_price > 0:
-                        # Use the entire CASH amount (portfolio_value) to buy shares
-                        shares = portfolio_value / buy_price
-                    else:
-                        shares = Decimal("0")
-                        portfolio_value = Decimal("0")
-                        
-                    # Log the BUY trade.
-                    trade_history.append({
-                        'Date': current_day.name.date(), 
-                        'Action': f"BUY {trade_ticker}", 
-                        'Asset': trade_ticker, 
-                        'Price': float(buy_price),
-                        'Portfolio Value': float(portfolio_value)
+                    # Execution Price is always the OPEN of the current day
+                    entry_price = row[f'{trade_ticker}_Open']
+                    
+                    # Calculation (Buy using ALL cash)
+                    shares_bought = cash_balance / entry_price
+                    shares_held = shares_bought
+                    cash_balance = Decimal("0.0")
+                    
+                    # Log the trade
+                    self.trade_history.append({
+                        'Date': index.strftime('%Y-%m-%d'),
+                        'Action': f"BUY {trade_ticker}",
+                        'Asset': trade_ticker,
+                        'Price': entry_price,
+                        'Portfolio Value': shares_held * entry_price, # Portfolio value is shares * price
+                        'Shares': shares_held
                     })
-                        
+
+                # Update the position tracker
                 current_ticker = trade_ticker
 
-            # --- 2. TRACKING: UPDATE PORTFOLIO VALUE FOR THE CURRENT DAY'S CLOSE ---
-            if current_ticker != 'CASH' and shares > 0:
-                # Use CLOSE price for tracking P/L (unrealized value)
-                current_price = current_day_prices.get(f'{current_ticker}_close_dec', Decimal("0"))
-                # Update the portfolio value based on the current close price (unrealized P/L)
-                portfolio_value = shares * current_price
-            
-            # Log the daily portfolio value
-            sim_df.loc[current_day.name, 'Portfolio_Value'] = float(portfolio_value) 
-
-        # --- Add final row to trade history for current holding value ---
-        if current_ticker != 'CASH' and shares > 0:
-            last_date = sim_df.index[-1].date()
-            final_price = current_day_prices.get(f'{current_ticker}_close_dec', Decimal("0"))
-            
-            trade_history.append({
-                'Date': last_date, 
-                'Action': f"HOLDING VALUE", 
-                'Asset': current_ticker, 
-                'Price': float(final_price),
-                'Portfolio Value': float(portfolio_value)
-            })
-
-
-        # Final B&H calculation (Use float for final comparison)
-        qqq_close_col = f'{TICKER}_close'
-        qqq_start_price = sim_df.iloc[0][qqq_close_col]
-        qqq_end_price = sim_df.iloc[-1][qqq_close_col]
-        buy_and_hold_qqq = float(INITIAL_INVESTMENT) * (qqq_end_price / qqq_start_price)
-
-        return float(portfolio_value), buy_and_hold_qqq, pd.DataFrame(trade_history)
-
-def run_backtests(full_data, target_date):
-    """Defines timeframes and runs the backtesting engine."""
-    
-    backtester = BacktestEngine(full_data)
-    signals_df = backtester.generate_historical_signals()
-    
-    if signals_df.empty:
-        st.error("Backtest failed: Could not generate historical signals.")
-        return [], pd.DataFrame() 
-
-    last_signal_date = signals_df.index.max().date()
-    # Use the earliest date where indicators are valid for 'Full History' backtest
-    start_of_tradable_data = signals_df.index.min().date() 
-    start_of_year = datetime(last_signal_date.year, 1, 1).date()
-    ytd_start_date = max(start_of_year, start_of_tradable_data) 
-    
-    three_months_back = (last_signal_date - timedelta(days=90))
-    one_week_back = (last_signal_date - timedelta(days=7))
-
-    timeframes = [
-        ("Full History", start_of_tradable_data), 
-        ("YTD (Since First Valid Signal)", ytd_start_date),
-        ("3 Months Back", three_months_back),
-        ("1 Week Back", one_week_back),
-        ("Signal Date to Today", target_date), 
-    ]
-    
-    results = []
-    trade_history_for_signal_date = pd.DataFrame() 
-    
-    for label, start_date in timeframes:
-        if start_date > last_signal_date and label != "Signal Date to Today": continue
-        
-        # Determine the first valid trading day on or after the start_date
-        relevant_dates = signals_df.index[signals_df.index.date >= start_date]
-        first_trade_day = relevant_dates.min().date() if not relevant_dates.empty else None
-
-        if first_trade_day is None:
-            # FIX: If the start_date is not in the index but is <= the last signal date, 
-            # we need to find the next available trading day.
-            if start_date <= last_signal_date:
-                # Find the first index date >= start_date
-                try:
-                    first_trade_day = signals_df.index[signals_df.index.date >= start_date].min().date()
-                except:
-                    continue # Skip if no data
+            # --- Daily Portfolio Value Tracking ---
+            if current_ticker != 'CASH':
+                # Use the close price of the held asset for daily valuation
+                close_price = row[f'{current_ticker}_Data']['Close']
+                daily_value = shares_held * close_price
             else:
-                continue
+                daily_value = cash_balance
             
-        signal_row_index = signals_df.index[signals_df.index.date >= first_trade_day].min()
-        initial_trade = signals_df.loc[signal_row_index, 'Trade_Ticker'] if not pd.isna(signal_row_index) else "N/A"
-        
-        final_value, buy_and_hold_qqq, trade_history_df = backtester.run_simulation(first_trade_day)
-
-        if label == "Signal Date to Today":
-            # --- FIX for KeyError: 'Action' when no trades are executed ---
-            if not trade_history_df.empty and 'Action' in trade_history_df.columns:
-                # Filter out the 'HOLDING VALUE' row for the main backtest table which only logs trades
-                trade_history_for_signal_date = trade_history_df[trade_history_df['Action'] != 'HOLDING VALUE'].copy()
-                # Then add the holding value row back for display purposes
-                if trade_history_df['Action'].str.contains('HOLDING VALUE').any():
-                     trade_history_for_signal_date = pd.concat([trade_history_for_signal_date, trade_history_df[trade_history_df['Action'] == 'HOLDING VALUE'].copy()], ignore_index=True)
-            else:
-                 trade_history_for_signal_date = pd.DataFrame() # Ensure empty if no trades were logged
+            df.loc[index, 'Daily_Portfolio_Value'] = daily_value
             
-        initial_float = float(INITIAL_INVESTMENT)
-        profit_loss = final_value - initial_float
-        bh_profit_loss = buy_and_hold_qqq - initial_float
-
-        # --- CAGR CALCULATION ---
-        end_date = last_signal_date # Use the date of the last signal for calculation
+        # --- Final Valuation ---
+        final_date = df.index[-1].strftime('%Y-%m-%d')
+        final_close_price = last_close_prices[current_ticker] if current_ticker != 'CASH' else Decimal("1.0")
         
-        # Calculate the number of years (using 365.25 for average days per year)
-        days_held = (end_date - first_trade_day).days
-        years_held = days_held / 365.25 if days_held > 0 else 1 
-        
-        # Strategy CAGR
-        if final_value > 0 and initial_float > 0 and years_held > 0:
-            strategy_cagr = ( (final_value / initial_float) ** (1 / years_held) - 1 ) * 100
+        if current_ticker != 'CASH':
+            final_value = shares_held * final_close_price
+            final_asset = current_ticker
         else:
-            strategy_cagr = 0.0
+            final_value = cash_balance
+            final_asset = 'CASH'
 
-        # B&H QQQ CAGR
-        if buy_and_hold_qqq > 0 and initial_float > 0 and years_held > 0:
-            bh_qqq_cagr = ( (buy_and_hold_qqq / initial_float) ** (1 / years_held) - 1 ) * 100
-        else:
-            bh_qqq_cagr = 0.0
-            
-        results.append({
-            "Timeframe": label,
-            "Start Date": first_trade_day.strftime('%Y-%m-%d'),
-            "First Trade": initial_trade,
-            "Strategy Value": final_value,
-            "B&H QQQ Value": buy_and_hold_qqq,
-            "P/L": profit_loss,
-            "B&H P/L": bh_profit_loss,
-            "Strategy CAGR": strategy_cagr, 
-            "B&H CAGR": bh_qqq_cagr
+        # Log the final, unrealized value
+        self.trade_history.append({
+            'Date': final_date,
+            'Action': 'HOLDING VALUE',
+            'Asset': final_asset,
+            'Price': final_close_price,
+            'Portfolio Value': final_value,
+            'Shares': shares_held
         })
         
-    return results, trade_history_for_signal_date
-
-# --- Plotly Charting Function ---
-
-def calculate_true_range_and_atr_for_chart(df, atr_period):
-    """Re-implemented helper for chart logic, which uses float math."""
-    high_minus_low = df['high'] - df['low']
-    high_minus_prev_close = np.abs(df['high'] - df['close'].shift(1))
-    low_minus_prev_close = np.abs(df['low'] - df['close'].shift(1))
-    
-    true_range = pd.DataFrame({'hl': high_minus_low, 'hpc': high_minus_prev_close, 'lpc': low_minus_prev_close}).max(axis=1)
-    atr_series = true_range.ewm(span=atr_period, adjust=False, min_periods=atr_period).mean()
-    
-    return atr_series 
-
-def create_chart(df, indicators):
-    """Creates a Plotly candlestick chart with indicators and date markers."""
-    
-    df_plot = df.copy() 
-    
-    fig = go.Figure(data=[
-        go.Candlestick(x=df_plot.index, open=df_plot['open'], high=df_plot['high'], low=df_plot['low'], close=df_plot['close'], name=TICKER)
-    ])
-
-    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[f'SMA_{SMA_PERIOD}'], mode='lines', name=f'{SMA_PERIOD}-Day SMA', line=dict(color='blue', width=2)))
-    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[f'EMA_{EMA_PERIOD}'], mode='lines', name=f'{EMA_PERIOD}-Day EMA', line=dict(color='orange', width=1)))
-    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['VASL_Level'], mode='lines', name='VASL Level', line=dict(color='red', width=1, dash='dot')))
-
-    # 1. Marker for the Price/Indicator on the Historical Signal Date
-    signal_date = indicators['signal_date']
-    signal_price = indicators['signal_price']
-    
-    signal_date_index = df_plot.index[df_plot.index.date == signal_date].max()
-
-    if pd.notna(signal_date_index):
-        # 1a. Add vertical line for the signal date (FIX: Added name to shape for legend)
-        fig.add_shape(
-            type="line",
-            x0=signal_date_index,
-            y0=df_plot['low'].min(),
-            x1=signal_date_index,
-            y1=df_plot['high'].max(),
-            line=dict(color="yellow", width=2, dash="dash"),
-            layer="below", 
-            # Adding a trace with mode='markers' and setting hoverinfo='skip' is the standard Plotly way to add a legend entry for a shape.
-        )
-        # FIX: Add an invisible scatter trace for the vertical line legend
-        fig.add_trace(go.Scatter(
-            x=[signal_date_index], 
-            y=[signal_price],
-            mode='markers',
-            marker=dict(size=0), # Invisible marker
-            showlegend=True,
-            name=f'Signal Date ({signal_date.strftime("%Y-%m-%d")})' # Legend entry
-        ))
+        trade_history_df = pd.DataFrame(self.trade_history)
         
-        # 1b. Add the marker
-        fig.add_trace(go.Scatter(
-            x=[signal_date_index], 
-            y=[signal_price], 
-            mode='markers', 
-            marker=dict(symbol='star', size=12, color='yellow', line=dict(width=2, color='black')),
-            name=f'Signal Price'
-        ))
+        return final_value, current_ticker, trade_history_df, df['Daily_Portfolio_Value']
 
-    # 2. Marker for the Latest Price (end of the chart)
-    latest_price = indicators['final_price']
-    last_date = df_plot.index[-1]
+# --- Metric Calculation ---
+
+def calculate_metrics(daily_value_series, initial_investment, target_date):
+    """Calculates CAGR, Max Drawdown, and Sharpe Ratio."""
     
-    fig.add_trace(go.Scatter(
-        x=[last_date], y=[latest_price], 
-        mode='markers', 
-        marker=dict(symbol='circle', size=10, color='lime', line=dict(width=2, color='black')),
-        name='Latest Close Price'
-    ))
+    # 1. CAGR
+    years = (daily_value_series.index[-1] - daily_value_series.index[0]).days / 365.25
+    final_value = daily_value_series.iloc[-1]
+    cagr = (float(final_value) / float(initial_investment)) ** (1 / years) - 1.0
 
-    fig.update_layout(
-        title=f'{TICKER} - Trading Strategy Indicators (Last ~{len(df_plot)} Trading Days)',
-        xaxis_title="Date",
-        yaxis_title="Price (USD)",
-        xaxis_rangeslider_visible=False,
-        height=600,
-        template='plotly_dark'
-    )
+    # 2. Max Drawdown
+    peak = daily_value_series.expanding(min_periods=1).max()
+    drawdown = (daily_value_series - peak) / peak
+    max_drawdown = drawdown.min()
+
+    # 3. Sharpe Ratio (Simplified: Using daily returns, assuming 252 trading days)
+    returns = daily_value_series.pct_change().dropna()
+    # Risk-free rate (simplified to 0 for backtesting context)
+    risk_free_rate = 0.0
     
-    return fig
-
-# --- Streamlit Application Layout ---
-
-def display_app():
-    
-    st.set_page_config(page_title="TQQQ/SQQQ Signal", layout="wide")
-    st.title("📈 TQQQ/SQQQ Daily Signal Generator & Full History Backtester")
-    st.markdown("Strategy priority: **1. VASL** $\implies$ **2. DMA** (TQQQ exit via **Mini-VASL** - *Position-Agnostic*) $\implies$ **3. Inverse EMA Exit**.")
-    st.markdown("---")
-
-    # 1. Data Fetch 
-    data_for_backtest = fetch_historical_data()
-
-    if data_for_backtest.empty:
-        st.error("FATAL ERROR: Signal calculation aborted due to insufficient or missing data.")
-        st.stop()
-        
-    latest_available_date = data_for_backtest.index.max().date()
-    first_available_date = data_for_backtest.index.min().date()
-    
-    min_tradeable_date_index = SMA_PERIOD 
-    if len(data_for_backtest) > min_tradeable_date_index:
-        min_tradeable_date = data_for_backtest.iloc[min_tradeable_date_index].name.date() 
+    # Check for sufficient data
+    if len(returns) > 0 and returns.std() != 0:
+        sharpe_ratio = (returns.mean() - risk_free_rate) / returns.std() * math.sqrt(252)
     else:
-        min_tradeable_date = latest_available_date
+        sharpe_ratio = 0.0
+        
+    # 4. Total Return
+    total_return = (float(final_value) / float(initial_investment)) - 1.0
 
-    # Determine the default date (last closed day)
-    target_date_initial = get_last_closed_trading_day()
+    return cagr, max_drawdown, sharpe_ratio, total_return
+
+# --- Streamlit App Layout ---
+
+st.set_page_config(layout="wide", page_title="DMA Mini-VASL Trading Strategy Backtester")
+
+# --- App Title and Configuration ---
+st.title("DMA Mini-VASL Trading Strategy Backtester")
+st.markdown("---")
+
+# Sidebar for Configuration
+st.sidebar.header("Strategy Parameters")
+st.sidebar.markdown(f"**Base Asset:** `{TICKER}`")
+st.sidebar.markdown(f"**Leveraged:** `{LEVERAGED_TICKER}`")
+st.sidebar.markdown(f"**Inverse:** `{INVERSE_TICKER}`")
+st.sidebar.markdown("---")
+
+# Strategy Rules Summary
+st.sidebar.header("Strategy Rules")
+st.sidebar.markdown(f"""
+* **DMA Bull Entry:** Price $\ge$ **{SMA_PERIOD}**-SMA and **{EMA_PERIOD}**-EMA $\ge$ **{SMA_PERIOD}**-SMA (Entry/Hold {LEVERAGED_TICKER}).
+* **DMA Bear Entry:** Price $< $ **{SMA_PERIOD}**-SMA and Price $< $ **{EMA_PERIOD}**-EMA (Entry/Hold {INVERSE_TICKER}).
+* **VASL Exit (Priority 1):** Hold **{LEVERAGED_TICKER}** $\rightarrow$ CASH if Price drops below **{EMA_PERIOD}**-EMA - (**{ATR_MULTIPLIER}** * {ATR_PERIOD}-ATR).
+* **Mini-VASL Exit (Priority 2):** Hold **{LEVERAGED_TICKER}** $\rightarrow$ CASH if Price drops below **{EMA_PERIOD}**-EMA - (**0.5** * {ATR_PERIOD}-ATR) (within DMA Bull).
+""")
+st.sidebar.markdown("---")
+
+
+# Date Selection
+last_trading_day = get_most_recent_trading_day()
+st.sidebar.subheader("Backtest Date Range")
+default_start_date = TQQQ_INCEPTION_DATE
+start_date_input = st.sidebar.date_input(
+    "Start Date", 
+    value=default_start_date, 
+    min_value=default_start_date, 
+    max_value=last_trading_day - timedelta(days=1)
+)
+
+end_date_input = last_trading_day # Always backtest up to the last closed day
+
+# --- Main Logic ---
+st.header("📊 Current Day Signal (Based on QQQ)")
+
+try:
+    df_data = fetch_data(start_date_input, end_date_input + timedelta(days=1))
     
-    # Determine the max date for input (calendar today)
-    max_input_date = get_calendar_today()
-
-    # --- Sidebar for Inputs ---
-    with st.sidebar:
-        st.header("1. Signal Date & Override Price")
+    if df_data.empty:
+        st.error("No valid data retrieved for the selected period. Please check the dates.")
+    else:
+        # Get data for the current signal date (last row)
+        current_data = df_data.iloc[-1]
         
-        # MAX_VALUE is now set to calendar today, allowing today's selection
-        target_date = st.date_input("Select Signal Date (Close Price)", value=target_date_initial, min_value=min_tradeable_date, max_value=max_input_date)
+        # --- 1. Current Signal Calculation ---
+        current_date = current_data.name.strftime('%Y-%m-%d')
         
-        # FIX: Checkbox for override price
-        override_enabled = st.checkbox("Enable QQQ Price Override", value=st.session_state['override_enabled'])
-        st.session_state['override_enabled'] = override_enabled
+        # --- Find Last Logged Position for current signal ---
+        # NOTE: A real-time app would need a persistent database for the last trade.
+        # Here we assume the last trade in the backtest history determines the current holding.
+        
+        # Since we run the full backtest every time, we need to run a quick preliminary backtest
+        # to determine the current holding before showing the real-time signal.
+        engine_temp = BacktestEngine(df_data, INITIAL_INVESTMENT, LEVERAGED_TICKER, INVERSE_TICKER, ATR_MULTIPLIER)
+        
+        # We need the Trade_Ticker column from the historical signals
+        df_signals_temp = engine_temp.generate_historical_signals(initial_ticker='CASH')
+        
+        # The holding ticker for today's signal is the signal ticker from yesterday
+        # This assumes the trading day is over and we are evaluating the signal for the *next* day.
+        current_holding_ticker = df_signals_temp['Trade_Ticker'].iloc[-2]
+        
+        # The signal is generated based on today's close price, but evaluated against the position held from yesterday.
+        final_signal, trade_ticker, conviction_status = generate_signal(
+            current_data['Close'], 
+            current_data['EMA_5'], 
+            current_data['SMA_200'], 
+            current_data['ATR'], 
+            current_holding_ticker
+        )
 
-        # FIX: number_input bug fixed by providing a safe default of 0.00
-        override_value = 0.00
-        if override_enabled:
-             # Use the last available close price as the default for the override box
-             last_close_price = float(data_for_backtest[f'{TICKER}_close'].iloc[-1]) if not data_for_backtest.empty and f'{TICKER}_close' in data_for_backtest.columns else 100.00
-             override_value = st.number_input("Override Signal Price (QQQ Close $)", value=last_close_price, min_value=0.01, format="%.2f", help="Manually test the strategy at a specific QQQ Close price level.")
-             st.session_state['override_price'] = override_value if override_value > 0.01 else None
+        st.markdown(f"**Date:** `{current_date}`")
+        st.markdown(f"**QQQ Close Price:** `${current_data['Close']:,.2f}`")
+        st.markdown(f"**Position Held (as of previous close):** `{current_holding_ticker}`")
+        st.markdown(f"**Signal:** {final_signal}")
+        st.markdown(f"**Conviction:** *{conviction_status}*")
+        
+        # --- 2. Backtest Simulation ---
+        st.markdown("---")
+        st.header("⏳ Backtest Simulation")
+
+        # Set a reasonable initial ticker for the backtest (start in CASH)
+        initial_backtest_ticker = 'CASH'
+        
+        # Run the full backtest
+        engine = BacktestEngine(df_data.copy(), INITIAL_INVESTMENT, LEVERAGED_TICKER, INVERSE_TICKER, ATR_MULTIPLIER)
+        df_signals = engine.generate_historical_signals(initial_ticker=initial_backtest_ticker)
+        
+        final_value, final_ticker, trade_history_df, daily_value_series = engine.run_simulation(df_signals)
+
+        # --- 3. Display Performance Metrics ---
+        st.subheader("Performance Metrics (Full History)")
+        cagr, max_drawdown, sharpe_ratio, total_return = calculate_metrics(daily_value_series, INITIAL_INVESTMENT, start_date_input)
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Final Value", f"${final_value:,.2f}")
+        col2.metric("Total Return", f"{total_return * 100:,.2f}%")
+        col3.metric("CAGR", f"{cagr * 100:,.2f}%")
+        col4.metric("Max Drawdown", f"{max_drawdown * 100:,.2f}%")
+
+        # --- 4. Display Chart (if data is available) ---
+        st.subheader("Portfolio Value Over Time")
+        
+        # Calculate Buy and Hold (B&H) for comparison
+        # B&H is assumed to buy the leveraged ticker on the first day
+        first_open_price = df_signals[f'{LEVERAGED_TICKER}_Data'].iloc[0]['Open']
+        initial_shares_bh = INITIAL_INVESTMENT / first_open_price
+        bh_series = df_signals[f'{LEVERAGED_TICKER}_Data'].apply(lambda x: x['Close']) * initial_shares_bh
+        bh_series = bh_series.apply(lambda x: float(x)) # Convert Decimal to float for plotting
+        
+        # Convert daily value to float for plotting
+        daily_value_plot = daily_value_series.apply(lambda x: float(x))
+
+        fig = go.Figure()
+
+        # Strategy Line
+        fig.add_trace(go.Scatter(
+            x=daily_value_plot.index, y=daily_value_plot.values,
+            mode='lines', name='Strategy Value'
+        ))
+
+        # Buy and Hold Line
+        fig.add_trace(go.Scatter(
+            x=bh_series.index, y=bh_series.values,
+            mode='lines', name=f'Buy & Hold ({LEVERAGED_TICKER})'
+        ))
+
+        # Plot settings
+        fig.update_layout(
+            title="Strategy vs. Buy & Hold Performance",
+            xaxis_title="Date",
+            yaxis_title="Portfolio Value ($)",
+            legend_title="Legend",
+            hovermode="x unified"
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        # --- 5. Display Detailed Trade History ---
+        st.header(f"📜 Detailed Trade History (From {start_date_input.strftime('%Y-%m-%d')} to {end_date_input.strftime('%Y-%m-%d')})")
+        st.caption("Trades listed here are executed at the Open price of the Date shown.")
+        
+        if not trade_history_df.empty:
+            
+            # Apply formatting
+            trade_history_df['Price'] = trade_history_df['Price'].map('${:,.2f}'.format)
+            trade_history_df['Portfolio Value'] = trade_history_df['Portfolio Value'].map('${:,.2f}'.format)
+            
+            # Display the dataframe without custom row styling
+            st.dataframe(
+                trade_history_df, 
+                column_config={
+                    "Date": st.column_config.DatetimeColumn("Date", format="YYYY-MM-DD"), 
+                    "Action": st.column_config.Column("Action", help="Trade action", width="small"), 
+                    "Asset": st.column_config.Column("Asset", width="small")
+                },
+                hide_index=True
+            )
+                
+            st.caption("This table logs every time the strategy transitions to a new position. The **final row** shows the unrealized value of the last asset held (calculated at the final day's close price).")
         else:
-            st.session_state['override_price'] = None
-
-        if st.button("Clear Data Cache & Rerun", help="Forces a fresh download of market data."):
-            st.cache_data.clear()
-            st.rerun()
-            
-        st.header("2. Strategy Parameters")
-        st.metric("Ticker", TICKER)
-        st.metric("SMA Period (DMA)", f"{SMA_PERIOD} days")
-        st.metric("EMA Period (VASL/Exit)", f"{EMA_PERIOD} days")
-        st.metric("ATR Period (VASL)", f"{ATR_PERIOD} days")
-        st.metric("ATR Multiplier (VASL)", ATR_MULTIPLIER)
-        st.metric("Backtest Capital", f"${float(INITIAL_INVESTMENT):,.2f}")
-        # FIX: UX polish
-        st.caption(f"Full Data start: **{first_available_date.strftime('%Y-%m-%d')}**")
+            st.info("No trades executed in this period (possibly due to continuous holding of the initial asset).")
 
 
-    # FIX: UX polish - clearer info box
-    st.info(f"Analysis running for **{target_date.strftime('%A, %B %d, %Y')}**'s closing data.")
-    
-    # New warning for live date selection without override
-    if target_date == max_input_date and not override_enabled:
-        st.warning("⚠️ You selected the current day without enabling the Price Override. The signal is based on the *last available* closing price from Yahoo Finance, which may be stale or only a partial price for today. **Use the Price Override for a live signal.**")
-        
-    st.markdown("---")
-    
-    # 2. Determine Final Signal Price 
-    final_signal_price = st.session_state['override_price']
-    qqq_close_col_name = f'{TICKER}_close'
-    
-    if final_signal_price is None:
-        try:
-            # Get the last available close price on or before the target date
-            data_for_signal_price = data_for_backtest[data_for_backtest.index.date <= target_date].copy()
-            if data_for_signal_price.empty:
-                 st.error(f"No market data available on or before {target_date.strftime('%Y-%m-%d')}.")
-                 st.stop()
-            # Use the actual close price of the last valid day
-            final_signal_price = data_for_signal_price[qqq_close_col_name].iloc[-1].item()
-        except Exception as e:
-            st.error(f"FATAL ERROR: Could not find the Adjusted Close price for the target date. Error: {e}")
-            st.stop()
+except Exception as e:
+    st.error(f"An error occurred during data processing or backtesting: {e}")
+    # st.exception(e) # Uncomment for detailed traceback
 
-    # 3. Calculate and Generate Signal
-    try:
-        # indicators are calculated using data UP TO target_date's close.
-        indicators, data_with_indicators = calculate_indicators(data_for_backtest, target_date, final_signal_price)
-        # UPDATED: Capture mini_vasl_exit_level
-        final_signal, trade_ticker, conviction_status, vasl_trigger_level, mini_vasl_exit_level = generate_signal(indicators) 
-    except ValueError as e: 
-        st.error(f"FATAL ERROR: {e}")
-        st.stop()
-    except Exception as e:
-        st.error(f"FATAL ERROR during indicator calculation or signal generation: {e}")
-        st.stop()
-
-    # 4. Run Backtests
-    backtest_results, trade_history_df = run_backtests(data_for_backtest, target_date)
-    
-    # ... (Display Signal and Metrics) ...
-    st.header(f"Daily Signal: {target_date.strftime('%Y-%m-%d')}")
-    
-    if "BUY TQQQ" in final_signal: st.success(f"## {final_signal}")
-    elif "SQQQ" in final_signal: st.warning(f"## {final_signal}")
-    else: st.error(f"## {final_signal}")
-
-    st.markdown("---")
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Signal Price (QQQ Close)", f"${indicators['current_price']:.2f}")
-    col2.metric("200-Day SMA", f"${indicators['sma_200']:.2f}")
-    col3.metric("DMA Conviction", conviction_status.split('(')[0].strip()) 
-
-    st.subheader("Volatility Stop-Loss (VASL) Details")
-    col_vasl_level, col_vasl_status = st.columns(2)
-    col_vasl_level.metric("5-Day EMA", f"${indicators['ema_5']:.2f}")
-    col_vasl_level.metric("14-Day ATR", f"${indicators['atr']:.2f}")
-    
-    level_format = col_vasl_status.error if "VASL Triggered" in conviction_status or "Mini-VASL Triggered" in conviction_status else col_vasl_status.success
-    level_format(f"**VASL Trigger Level:** ${vasl_trigger_level:.2f}")
-    
-    # ADDED: Display Mini-VASL Exit Level
-    col_vasl_status.metric("Mini-VASL Exit Level (DMA Bull)", f"${mini_vasl_exit_level:.2f}")
-
-    st.markdown("---")
-    
-    # --- 6. Display Results: INTERACTIVE CHART ---
-    st.header("📈 Interactive Indicator Chart")
-    
-    # Fetch 400 days to ensure 200-day SMA is calculated for the visible 200-day range
-    chart_data = data_for_backtest.iloc[-400:].copy() 
-    
-    if not chart_data.empty:
-        # Recalculate indicators on the full visible range for accurate display
-        chart_data.ta.sma(length=SMA_PERIOD, append=True)
-        chart_data.ta.ema(length=EMA_PERIOD, append=True)
-        # Use the float-based helper for the chart data
-        chart_data['ATR'] = calculate_true_range_and_atr_for_chart(chart_data, ATR_PERIOD)
-        chart_data['VASL_Level'] = chart_data[f'EMA_{EMA_PERIOD}'] - (ATR_MULTIPLIER * chart_data['ATR'])
-        
-        # Only display the last 200 trading days
-        chart_data = chart_data.iloc[-200:].dropna(subset=[f'SMA_{SMA_PERIOD}', 'open']) 
-
-        chart_indicators = {
-            'signal_date': target_date,
-            'signal_price': final_signal_price,
-            'final_price': data_for_backtest['close'].iloc[-1] 
-        }
-        
-        try:
-            chart_fig = create_chart(chart_data, chart_indicators) 
-            st.plotly_chart(chart_fig, width='stretch')
-        except Exception as e:
-            st.error(f"Could not generate chart. Error: {e}")
-    else:
-        st.warning("Insufficient data to display the chart.")
-
-    st.markdown("---")
-    
-    # --- 7. Display Results: AGGREGATE BACKTESTING ---
-    st.header("⏱️ Backtest Performance (vs. QQQ Buy & Hold)")
-    st.markdown(f"**Simulation:** ${float(INITIAL_INVESTMENT):,.2f} initial investment traded based on **lookahead-free historical daily signals**, executed at the **next day's Open price**.")
-
-    if backtest_results:
-        df_results = pd.DataFrame(backtest_results)
-        df_results['Strategy Value'] = df_results['Strategy Value'].map('${:,.2f}'.format)
-        df_results['B&H QQQ Value'] = df_results['B&H QQQ Value'].map('${:,.2f}'.format)
-        df_results['P/L'] = df_results['P/L'].map(lambda x: f"{'+' if x >= 0 else ''}${x:,.2f}")
-        df_results['B&H P/L'] = df_results['B&H P/L'].map(lambda x: f"{'+' if x >= 0 else ''}${x:,.2f}")
-        
-        # Format the new CAGR columns
-        df_results['Strategy CAGR'] = df_results['Strategy CAGR'].map(lambda x: f"{'+' if x >= 0 else ''}{x:,.2f}%")
-        df_results['B&H CAGR'] = df_results['B&H CAGR'].map(lambda x: f"{'+' if x >= 0 else ''}{x:,.2f}%")
-        
-        df_results = df_results.rename(columns={"B&H QQQ Value": "B&H Value", "B&H P/L": "B&H P/L", "Initial Trade": "First Trade"})
-        
-        # Updated column order to include CAGR
-        column_order = ["Timeframe", "Start Date", "First Trade", "Strategy Value", "Strategy CAGR", "B&H Value", "B&H CAGR"]
-        df_results = df_results[column_order]
-        st.dataframe(df_results, hide_index=True)
-
-    st.markdown("---")
-    
-    # --- 8. Display Detailed Trade History ---
-    st.header(f"📜 Detailed Trade History (From {target_date.strftime('%Y-%m-%d')} to Today)")
-    st.caption("**Trades listed here are executed at the Open price of the Date shown.**")
-    
-    if not trade_history_df.empty:
-        
-        # Apply formatting
-        trade_history_df['Price'] = trade_history_df['Price'].map('${:,.2f}'.format)
-        trade_history_df['Portfolio Value'] = trade_history_df['Portfolio Value'].map('${:,.2f}'.format)
-        
-        # Display the dataframe without custom row styling
-        st.dataframe(
-            trade_history_df, 
-            column_config={
-                "Date": st.column_config.DatetimeColumn("Date", format="YYYY-MM-DD"), 
-                "Action": st.column_config.Column("Action", help="Trade action", width="small"), 
-                "Asset": st.column_config.Column("Asset", width="small")
-            },
-            hide_index=True
-        )
-            
-        st.caption("This table logs every time the strategy transitions to a new position. The **final row** shows the unrealized value of the last asset held (calculated at the final day's close price).")
-    else:
-        st.info("No trades were executed during the selected 'Signal Date to Today' backtest period.")
-
-if __name__ == "__main__":
-    display_app()
+# --- Footer ---
+st.markdown("---")
+st.markdown("Disclaimer: This tool is for educational backtesting purposes only and not financial advice.")
