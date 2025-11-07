@@ -35,14 +35,19 @@ if 'override_price' not in st.session_state:
 if 'override_enabled' not in st.session_state:
     st.session_state['override_enabled'] = False
 
-# --- Timezone-Aware Date Function (FIX: Corrected to New York Timezone) ---
+# --- Timezone-Aware Date Functions ---
 
-def get_most_recent_trading_day():
+def get_calendar_today():
+    """Returns the current calendar date in New York (ET) timezone."""
+    new_york_tz = pytz.timezone('America/New_York')
+    return datetime.now(new_york_tz).date()
+
+def get_last_closed_trading_day():
     """Determines the most recent CLOSED trading day using New York (ET) timezone."""
-    new_york_tz = pytz.timezone('America/New_York') # FIX: Use New York for market time
+    new_york_tz = pytz.timezone('America/New_York')
     now_et = datetime.now(new_york_tz)
     market_close_hour = 16 # 4:00 PM ET
-    market_close_minute = 0 # FIX: Market closes at 4:00 PM ET (not 4:30 PM)
+    market_close_minute = 0 
     
     target_date = now_et.date()
 
@@ -64,8 +69,10 @@ def get_most_recent_trading_day():
 def fetch_historical_data(): 
     """
     Fetches historical data for QQQ, TQQQ, and SQQQ starting from TQQQ's inception date.
+    Uses get_calendar_today() to ensure today's partial data is fetched if available.
     """
-    today_for_fetch = get_most_recent_trading_day()
+    # Use calendar today to ensure all data is fetched
+    today_for_fetch = get_calendar_today() 
     market_end_date = today_for_fetch + timedelta(days=1) 
     
     start_date = TQQQ_INCEPTION_DATE
@@ -198,7 +205,7 @@ def generate_signal(indicators, current_holding_ticker=None):
             # Price is Bullish (Above 200-SMA)
             
             # **MODIFIED RULE: Mini-VASL Exit (DMA Bull, price drops near 5-EMA minus 0.5*ATR)**
-            # No longer requires current_holding_ticker == LEVERAGED_TICKER
+            # Mini-VASL triggers an exit to CASH regardless of current position status
             if price < mini_vasl_exit_level: 
                  final_signal = "**SELL TQQQ / CASH (Mini-VASL Exit Triggered)**"
                  trade_ticker = 'CASH'
@@ -650,18 +657,18 @@ def display_app():
     else:
         min_tradeable_date = latest_available_date
 
-    # FIX: Holiday/Weekend Handling (Determine the actual latest trading day)
-    target_date_initial = latest_available_date
-    if target_date_initial not in data_for_backtest.index.date:
-        # Fallback to the last available date in the index
-        target_date_initial = data_for_backtest.index[-1].date() 
-        st.sidebar.warning(f"Note: Using **{target_date_initial.strftime('%Y-%m-%d')}** as the latest trading day due to weekend/holiday.")
+    # Determine the default date (last closed day)
+    target_date_initial = get_last_closed_trading_day()
+    
+    # Determine the max date for input (calendar today)
+    max_input_date = get_calendar_today()
 
     # --- Sidebar for Inputs ---
     with st.sidebar:
         st.header("1. Signal Date & Override Price")
         
-        target_date = st.date_input("Select Signal Date (Close Price)", value=target_date_initial, min_value=min_tradeable_date, max_value=target_date_initial)
+        # MAX_VALUE is now set to calendar today, allowing today's selection
+        target_date = st.date_input("Select Signal Date (Close Price)", value=target_date_initial, min_value=min_tradeable_date, max_value=max_input_date)
         
         # FIX: Checkbox for override price
         override_enabled = st.checkbox("Enable QQQ Price Override", value=st.session_state['override_enabled'])
@@ -670,7 +677,9 @@ def display_app():
         # FIX: number_input bug fixed by providing a safe default of 0.00
         override_value = 0.00
         if override_enabled:
-             override_value = st.number_input("Override Signal Price (QQQ Close $)", value=float(data_for_backtest[f'{TICKER}_close'].iloc[-1]), min_value=0.01, format="%.2f", help="Manually test the strategy at a specific QQQ Close price level.")
+             # Use the last available close price as the default for the override box
+             last_close_price = float(data_for_backtest[f'{TICKER}_close'].iloc[-1]) if not data_for_backtest.empty and f'{TICKER}_close' in data_for_backtest.columns else 100.00
+             override_value = st.number_input("Override Signal Price (QQQ Close $)", value=last_close_price, min_value=0.01, format="%.2f", help="Manually test the strategy at a specific QQQ Close price level.")
              st.session_state['override_price'] = override_value if override_value > 0.01 else None
         else:
             st.session_state['override_price'] = None
@@ -692,6 +701,11 @@ def display_app():
 
     # FIX: UX polish - clearer info box
     st.info(f"Analysis running for **{target_date.strftime('%A, %B %d, %Y')}**'s closing data.")
+    
+    # New warning for live date selection without override
+    if target_date == max_input_date and not override_enabled:
+        st.warning("⚠️ You selected the current day without enabling the Price Override. The signal is based on the *last available* closing price from Yahoo Finance, which may be stale or only a partial price for today. **Use the Price Override for a live signal.**")
+        
     st.markdown("---")
     
     # 2. Determine Final Signal Price 
