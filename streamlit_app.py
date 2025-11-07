@@ -491,11 +491,15 @@ def run_backtests(full_data, target_date):
         final_value, buy_and_hold_qqq, trade_history_df = backtester.run_simulation(first_trade_day)
 
         if label == "Signal Date to Today":
-            # Filter out the 'HOLDING VALUE' row for the main backtest table which only logs trades
-            trade_history_for_signal_date = trade_history_df[trade_history_df['Action'] != 'HOLDING VALUE'].copy()
-            # Then add the holding value row back for display purposes
-            if trade_history_df['Action'].str.contains('HOLDING VALUE').any():
-                 trade_history_for_signal_date = pd.concat([trade_history_for_signal_date, trade_history_df[trade_history_df['Action'] == 'HOLDING VALUE'].copy()], ignore_index=True)
+            # --- FIX for KeyError: 'Action' when no trades are executed ---
+            if not trade_history_df.empty and 'Action' in trade_history_df.columns:
+                # Filter out the 'HOLDING VALUE' row for the main backtest table which only logs trades
+                trade_history_for_signal_date = trade_history_df[trade_history_df['Action'] != 'HOLDING VALUE'].copy()
+                # Then add the holding value row back for display purposes
+                if trade_history_df['Action'].str.contains('HOLDING VALUE').any():
+                     trade_history_for_signal_date = pd.concat([trade_history_for_signal_date, trade_history_df[trade_history_df['Action'] == 'HOLDING VALUE'].copy()], ignore_index=True)
+            else:
+                 trade_history_for_signal_date = pd.DataFrame() # Ensure empty if no trades were logged
             
         initial_float = float(INITIAL_INVESTMENT)
         profit_loss = final_value - initial_float
