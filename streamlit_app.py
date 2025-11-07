@@ -21,7 +21,7 @@ EMA_PERIOD = 5
 ATR_PERIOD = 14
 ATR_MULTIPLIER = 2.0
 SMA_PERIOD = 200
-# 🚨 Convert INITIAL_INVESTMENT to Decimal
+# Convert INITIAL_INVESTMENT to Decimal
 INITIAL_INVESTMENT = Decimal("10000.00")
 LEVERAGED_TICKER = "TQQQ"
 INVERSE_TICKER = "SQQQ"
@@ -32,23 +32,27 @@ TQQQ_INCEPTION_DATE = datetime(2010, 2, 9).date()
 # Initialize Session State for date/price overrides
 if 'override_price' not in st.session_state:
     st.session_state['override_price'] = None
+if 'override_enabled' not in st.session_state:
+    st.session_state['override_enabled'] = False
 
-# --- Timezone-Aware Date Function ---
+# --- Timezone-Aware Date Function (FIX: Corrected to New York Timezone) ---
 
 def get_most_recent_trading_day():
-    """Determines the most recent CLOSED trading day."""
-    california_tz = pytz.timezone('America/Los_Angeles')
-    now_ca = datetime.now(california_tz)
-    market_close_hour = 16
-    market_close_minute = 30
+    """Determines the most recent CLOSED trading day using New York (ET) timezone."""
+    new_york_tz = pytz.timezone('America/New_York') # FIX: Use New York for market time
+    now_et = datetime.now(new_york_tz)
+    market_close_hour = 16 # 4:00 PM ET
+    market_close_minute = 0 # FIX: Market closes at 4:00 PM ET (not 4:30 PM)
     
-    target_date = now_ca.date()
+    target_date = now_et.date()
 
-    cutoff_time = now_ca.replace(hour=market_close_hour, minute=market_close_minute, second=0, microsecond=0)
+    cutoff_time = now_et.replace(hour=market_close_hour, minute=market_close_minute, second=0, microsecond=0)
     
-    if now_ca < cutoff_time:
+    # If before market close today, the target date is yesterday
+    if now_et < cutoff_time:
         target_date -= timedelta(days=1)
 
+    # Move back if target date is a weekend
     while target_date.weekday() > 4:
         target_date -= timedelta(days=1)
         
@@ -60,10 +64,6 @@ def get_most_recent_trading_day():
 def fetch_historical_data(): 
     """
     Fetches historical data for QQQ, TQQQ, and SQQQ starting from TQQQ's inception date.
-    
-    FIX 1A (Data Prep): Now fetches Open price for all tickers for realistic execution.
-    FIX 3A (Data Prep): Ensures use of Adj Close/Close for indicator calculation.
-    FIX: Ensures 'open' column is present for charting.
     """
     today_for_fetch = get_most_recent_trading_day()
     market_end_date = today_for_fetch + timedelta(days=1) 
@@ -78,7 +78,7 @@ def fetch_historical_data():
             end=market_end_date, 
             interval="1d", 
             progress=False,
-            auto_adjust=False, # We handle Adj Close/Close selection below
+            auto_adjust=False, 
             timeout=15 
         )
         
@@ -93,25 +93,24 @@ def fetch_historical_data():
             elif ('Close', ticker) in all_data.columns:
                 df_combined[f'{ticker}_close'] = all_data['Close'][ticker]
             
-            # Get Open Price for execution (Fix 1A)
+            # Get Open Price for execution
             if ('Open', ticker) in all_data.columns:
                  df_combined[f'{ticker}_open'] = all_data['Open'][ticker]
                 
             # Get QQQ high/low/open for ATR/Charting
             if ticker == TICKER:
-                for metric in ['High', 'Low', 'Volume', 'Open']: # <-- Added 'Open' here
+                for metric in ['High', 'Low', 'Volume', 'Open']: 
                     if (metric, ticker) in all_data.columns:
-                        df_combined[metric.lower()] = all_data[metric][ticker] # <-- Creates 'high', 'low', 'open'
+                        df_combined[metric.lower()] = all_data[metric][ticker] 
 
         # Map QQQ columns to generic names required by functions like calculate_indicators & create_chart
         if f'{TICKER}_close' in df_combined.columns:
             df_combined['close'] = df_combined[f'{TICKER}_close']
         
-        # FIX: Ensure 'open' column is present for charting
         if f'{TICKER}_open' in df_combined.columns:
             df_combined['open'] = df_combined[f'{TICKER}_open']
             
-        required_cols = ['open', 'high', 'low', 'close', # <-- 'open' added to required check
+        required_cols = ['open', 'high', 'low', 'close', 
                          f'{LEVERAGED_TICKER}_close', f'{INVERSE_TICKER}_close',
                          f'{TICKER}_open', f'{LEVERAGED_TICKER}_open', f'{INVERSE_TICKER}_open']
                          
@@ -126,7 +125,6 @@ def fetch_historical_data():
 # --- Indicator Calculations ---
 
 def calculate_true_range_and_atr(df, atr_period):
-    # This uses QQQ high/low/close, which comes from the Adj Close series (Fix 3A consistent)
     high_minus_low = df['high'] - df['low']
     high_minus_prev_close = np.abs(df['high'] - df['close'].shift(1))
     low_minus_prev_close = np.abs(df['low'] - df['close'].shift(1))
@@ -138,6 +136,7 @@ def calculate_true_range_and_atr(df, atr_period):
 
 def calculate_indicators(data_daily, target_date, current_price):
     """Calculates all indicators using data only up to target_date (Close Price)."""
+    # Filter up to and including the target date
     df = data_daily[data_daily.index.date <= target_date].copy() 
     
     if df.empty:
@@ -157,8 +156,10 @@ def calculate_indicators(data_daily, target_date, current_price):
     df['ATR'] = calculate_true_range_and_atr(df, ATR_PERIOD)
     latest_atr = df['ATR'].ffill().iloc[-1]
 
+    # Clean up numpy types for consistent metric display
     current_sma_200 = current_sma_200.item() if hasattr(current_sma_200, 'item') else current_sma_200
     latest_ema_5 = latest_ema_5.item() if hasattr(latest_ema_5, 'item') else latest_ema_5
+    latest_atr = latest_atr.item() if hasattr(latest_atr, 'item') else latest_atr
     
     if not all(np.isfinite([current_sma_200, latest_ema_5, latest_atr])):
         raise ValueError("Indicator calculation resulted in infinite or non-numeric values.")
@@ -241,10 +242,7 @@ class BacktestEngine:
         
     def generate_historical_signals(self):
         """
-        Generates the trading signal for every day in the history using the refined logic.
-        
-        FIX 1A (Signal Generation): The signal for Day N is generated using Day N-1's indicators.
-        The price used as the trigger is the close price of Day N-1 (for lookahead freedom).
+        Generates the trading signal for every day in the history using lookahead-free logic.
         """
         # 1. Calculate all indicators on the existing data
         self.df.ta.sma(length=SMA_PERIOD, append=True)
@@ -272,7 +270,7 @@ class BacktestEngine:
                 current_ticker_historical = 'CASH'
                 continue
                 
-            # Previous day's QQQ Close price (The trigger price - FIX 1A Lookahead Free)
+            # Previous day's QQQ Close price (The trigger price - Lookahead Free)
             price = prev_data['prev_close'] 
             
             # Previous day's indicator values
@@ -317,9 +315,7 @@ class BacktestEngine:
     def run_simulation(self, start_date):
         """
         Runs the $10k simulation and logs all trades. 
-        
-        FIX 1A (Execution): Trades execute at the current day's Open price, 
-        using the signal generated from the previous day's close.
+        Execution: Trades execute at the current day's Open price.
         """
         sim_df = self.df[self.df.index.date >= start_date].copy()
         if sim_df.empty: return float(INITIAL_INVESTMENT), 0, pd.DataFrame() 
@@ -334,12 +330,12 @@ class BacktestEngine:
             current_day = sim_df.iloc[i]
             trade_ticker = current_day['Trade_Ticker']
             
-            # Convert float prices from DataFrame to Decimal
+            # FIX: Ensure all prices are converted to Decimal at entry to simulation loop
             current_day_prices = {}
             for t in [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]:
                 # CLOSE price for P/L tracking (unrealized value)
                 current_day_prices[f'{t}_close_dec'] = Decimal(str(current_day[f'{t}_close']))
-                # OPEN price for execution (Fix 1A)
+                # OPEN price for execution
                 current_day_prices[f'{t}_open_dec'] = Decimal(str(current_day[f'{t}_open']))
             
             # --- 1. HANDLE TRADE SIGNAL CHANGE ---
@@ -347,7 +343,7 @@ class BacktestEngine:
                 
                 # A. SELL (Exit Current Position)
                 if current_ticker != 'CASH':
-                    # Execute SELL at the current day's Open price (Fix 1A)
+                    # Execute SELL at the current day's Open price
                     sell_price = current_day_prices.get(f'{current_ticker}_open_dec', Decimal("0"))
                     if sell_price > 0:
                          realized_cash = shares * sell_price
@@ -359,8 +355,8 @@ class BacktestEngine:
                         'Date': current_day.name.date(), 
                         'Action': f"SELL {current_ticker}", 
                         'Asset': current_ticker, 
-                        'Price': float(sell_price), 
-                        'Portfolio Value': float(realized_cash) 
+                        'Price': float(sell_price), # Store as float for display
+                        'Portfolio Value': float(realized_cash) # Store as float for display
                     })
                     
                     # Update portfolio state to CASH.
@@ -369,7 +365,7 @@ class BacktestEngine:
                 
                 # B. BUY (Enter New Position)
                 if trade_ticker != 'CASH':
-                    # Execute BUY at the current day's Open price (Fix 1A)
+                    # Execute BUY at the current day's Open price
                     buy_price = current_day_prices.get(f'{trade_ticker}_open_dec', Decimal("0"))
                     
                     if buy_price > 0:
@@ -384,7 +380,7 @@ class BacktestEngine:
                         'Date': current_day.name.date(), 
                         'Action': f"BUY {trade_ticker}", 
                         'Asset': trade_ticker, 
-                        'Price': float(buy_price), 
+                        'Price': float(buy_price),
                         'Portfolio Value': float(portfolio_value)
                     })
                         
@@ -400,7 +396,7 @@ class BacktestEngine:
             # Log the daily portfolio value
             sim_df.loc[current_day.name, 'Portfolio_Value'] = float(portfolio_value) 
 
-        # --- FIX: Add final row to trade history for current holding value ---
+        # --- Add final row to trade history for current holding value ---
         if current_ticker != 'CASH' and shares > 0:
             last_date = sim_df.index[-1].date()
             final_price = current_day_prices.get(f'{current_ticker}_close_dec', Decimal("0"))
@@ -409,12 +405,12 @@ class BacktestEngine:
                 'Date': last_date, 
                 'Action': f"HOLDING VALUE", 
                 'Asset': current_ticker, 
-                'Price': float(final_price), 
+                'Price': float(final_price),
                 'Portfolio Value': float(portfolio_value)
             })
 
 
-        # Final B&H calculation
+        # Final B&H calculation (Use float for final comparison)
         qqq_close_col = f'{TICKER}_close'
         qqq_start_price = sim_df.iloc[0][qqq_close_col]
         qqq_end_price = sim_df.iloc[-1][qqq_close_col]
@@ -455,13 +451,21 @@ def run_backtests(full_data, target_date):
     for label, start_date in timeframes:
         if start_date > last_signal_date and label != "Signal Date to Today": continue
         
+        # Determine the first valid trading day on or after the start_date
         relevant_dates = signals_df.index[signals_df.index.date >= start_date]
         first_trade_day = relevant_dates.min().date() if not relevant_dates.empty else None
 
         if first_trade_day is None:
-            if label == "Signal Date to Today" and start_date <= last_signal_date:
-                first_trade_day = start_date 
-            else: continue
+            # FIX: If the start_date is not in the index but is <= the last signal date, 
+            # we need to find the next available trading day.
+            if start_date <= last_signal_date:
+                # Find the first index date >= start_date
+                try:
+                    first_trade_day = signals_df.index[signals_df.index.date >= start_date].min().date()
+                except:
+                    continue # Skip if no data
+            else:
+                continue
             
         signal_row_index = signals_df.index[signals_df.index.date >= first_trade_day].min()
         initial_trade = signals_df.loc[signal_row_index, 'Trade_Ticker'] if not pd.isna(signal_row_index) else "N/A"
@@ -484,7 +488,7 @@ def run_backtests(full_data, target_date):
         
         # Calculate the number of years (using 365.25 for average days per year)
         days_held = (end_date - first_trade_day).days
-        years_held = days_held / 365.25 if days_held > 0 else 1 # Avoid division by zero, use 1 year minimum for CAGR formula if days_held is 0
+        years_held = days_held / 365.25 if days_held > 0 else 1 
         
         # Strategy CAGR
         if final_value > 0 and initial_float > 0 and years_held > 0:
@@ -530,7 +534,6 @@ def create_chart(df, indicators):
     
     df_plot = df.copy() 
     
-    # FIX: 'open' column is now guaranteed to be present for QQQ
     fig = go.Figure(data=[
         go.Candlestick(x=df_plot.index, open=df_plot['open'], high=df_plot['high'], low=df_plot['low'], close=df_plot['close'], name=TICKER)
     ])
@@ -546,7 +549,7 @@ def create_chart(df, indicators):
     signal_date_index = df_plot.index[df_plot.index.date == signal_date].max()
 
     if pd.notna(signal_date_index):
-        # 1a. Add vertical line for the signal date
+        # 1a. Add vertical line for the signal date (FIX: Added name to shape for legend)
         fig.add_shape(
             type="line",
             x0=signal_date_index,
@@ -555,8 +558,17 @@ def create_chart(df, indicators):
             y1=df_plot['high'].max(),
             line=dict(color="yellow", width=2, dash="dash"),
             layer="below", 
-            name="Signal Date"
+            # Adding a trace with mode='markers' and setting hoverinfo='skip' is the standard Plotly way to add a legend entry for a shape.
         )
+        # FIX: Add an invisible scatter trace for the vertical line legend
+        fig.add_trace(go.Scatter(
+            x=[signal_date_index], 
+            y=[signal_price],
+            mode='markers',
+            marker=dict(size=0), # Invisible marker
+            showlegend=True,
+            name=f'Signal Date ({signal_date.strftime("%Y-%m-%d")})' # Legend entry
+        ))
         
         # 1b. Add the marker
         fig.add_trace(go.Scatter(
@@ -564,7 +576,7 @@ def create_chart(df, indicators):
             y=[signal_price], 
             mode='markers', 
             marker=dict(symbol='star', size=12, color='yellow', line=dict(width=2, color='black')),
-            name=f'Signal Price ({signal_date.strftime("%Y-%m-%d")})'
+            name=f'Signal Price'
         ))
 
     # 2. Marker for the Latest Price (end of the chart)
@@ -614,18 +626,32 @@ def display_app():
     else:
         min_tradeable_date = latest_available_date
 
+    # FIX: Holiday/Weekend Handling (Determine the actual latest trading day)
+    target_date_initial = latest_available_date
+    if target_date_initial not in data_for_backtest.index.date:
+        # Fallback to the last available date in the index
+        target_date_initial = data_for_backtest.index[-1].date() 
+        st.sidebar.warning(f"Note: Using **{target_date_initial.strftime('%Y-%m-%d')}** as the latest trading day due to weekend/holiday.")
+
     # --- Sidebar for Inputs ---
     with st.sidebar:
-        st.header("1. Target Date & Price")
+        st.header("1. Signal Date & Override Price")
         
-        target_date = st.date_input("Select Signal Date", value=latest_available_date, min_value=min_tradeable_date, max_value=latest_available_date)
+        target_date = st.date_input("Select Signal Date (Close Price)", value=target_date_initial, min_value=min_tradeable_date, max_value=target_date_initial)
         
-        if target_date.weekday() > 4 and target_date in data_for_backtest.index.date:
-             st.warning(f"**{target_date.strftime('%Y-%m-%d')} is a weekend.** Displaying data from the closest prior trading day if available.")
+        # FIX: Checkbox for override price
+        override_enabled = st.checkbox("Enable QQQ Price Override", value=st.session_state['override_enabled'])
+        st.session_state['override_enabled'] = override_enabled
 
-        st.session_state['override_price'] = st.number_input("Optional: Override Signal Price (QQQ Close $)", value=None, min_value=0.01, format="%.2f", help="Manually test the strategy at a specific QQQ Close price level (used for indicator calculation).")
+        # FIX: number_input bug fixed by providing a safe default of 0.00
+        override_value = 0.00
+        if override_enabled:
+             override_value = st.number_input("Override Signal Price (QQQ Close $)", value=float(data_for_backtest[f'{TICKER}_close'].iloc[-1]), min_value=0.01, format="%.2f", help="Manually test the strategy at a specific QQQ Close price level.")
+             st.session_state['override_price'] = override_value if override_value > 0.01 else None
+        else:
+            st.session_state['override_price'] = None
 
-        if st.button("Clear Data Cache & Rerun", help="Forces a fresh download."):
+        if st.button("Clear Data Cache & Rerun", help="Forces a fresh download of market data."):
             st.cache_data.clear()
             st.rerun()
             
@@ -636,10 +662,12 @@ def display_app():
         st.metric("ATR Period (VASL)", f"{ATR_PERIOD} days")
         st.metric("ATR Multiplier (VASL)", ATR_MULTIPLIER)
         st.metric("Backtest Capital", f"${float(INITIAL_INVESTMENT):,.2f}")
-        st.caption(f"Full Backtest Data starts from: **{first_available_date.strftime('%Y-%m-%d')}**")
+        # FIX: UX polish
+        st.caption(f"Full Data start: **{first_available_date.strftime('%Y-%m-%d')}**")
 
 
-    st.info(f"Analysis running for market close data on **{target_date.strftime('%A, %B %d, %Y')}**.")
+    # FIX: UX polish - clearer info box
+    st.info(f"Analysis running for **{target_date.strftime('%A, %B %d, %Y')}**'s closing data.")
     st.markdown("---")
     
     # 2. Determine Final Signal Price 
@@ -648,11 +676,12 @@ def display_app():
     
     if final_signal_price is None:
         try:
+            # Get the last available close price on or before the target date
             data_for_signal_price = data_for_backtest[data_for_backtest.index.date <= target_date].copy()
             if data_for_signal_price.empty:
-                 st.error(f"No data available on or before {target_date.strftime('%Y-%m-%d')}.")
+                 st.error(f"No market data available on or before {target_date.strftime('%Y-%m-%d')}.")
                  st.stop()
-            # Use the actual close price of the target day for current analysis/signal display
+            # Use the actual close price of the last valid day
             final_signal_price = data_for_signal_price[qqq_close_col_name].iloc[-1].item()
         except Exception as e:
             st.error(f"FATAL ERROR: Could not find the Adjusted Close price for the target date. Error: {e}")
@@ -660,9 +689,8 @@ def display_app():
 
     # 3. Calculate and Generate Signal
     try:
+        # indicators are calculated using data UP TO target_date's close.
         indicators, data_with_indicators = calculate_indicators(data_for_backtest, target_date, final_signal_price)
-        # For the final signal, we assume we are not holding anything if testing an arbitrary date
-        # The target date analysis uses current data, unlike the backtest which uses lagged data
         final_signal, trade_ticker, conviction_status, vasl_trigger_level = generate_signal(indicators) 
     except ValueError as e: 
         st.error(f"FATAL ERROR: {e}")
@@ -672,7 +700,6 @@ def display_app():
         st.stop()
 
     # 4. Run Backtests
-    # Backtests now use the improved lookahead-free logic (Fix 1A)
     backtest_results, trade_history_df = run_backtests(data_for_backtest, target_date)
     
     # ... (Display Signal and Metrics) ...
@@ -714,7 +741,7 @@ def display_app():
         chart_data['VASL_Level'] = chart_data[f'EMA_{EMA_PERIOD}'] - (ATR_MULTIPLIER * chart_data['ATR'])
         
         # Only display the last 200 trading days
-        chart_data = chart_data.iloc[-200:].dropna(subset=[f'SMA_{SMA_PERIOD}', 'open']) # <-- Added 'open' check
+        chart_data = chart_data.iloc[-200:].dropna(subset=[f'SMA_{SMA_PERIOD}', 'open']) 
 
         chart_indicators = {
             'signal_date': target_date,
