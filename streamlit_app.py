@@ -197,13 +197,14 @@ def generate_signal(indicators, current_holding_ticker=None):
         if dma_bull_price:
             # Price is Bullish (Above 200-SMA)
             
-            # **NEW RULE: Mini-VASL Exit (DMA Bull, but price drops near 5-EMA minus 0.5*ATR)**
-            if current_holding_ticker == LEVERAGED_TICKER and price < mini_vasl_exit_level:
+            # **MODIFIED RULE: Mini-VASL Exit (DMA Bull, price drops near 5-EMA minus 0.5*ATR)**
+            # No longer requires current_holding_ticker == LEVERAGED_TICKER
+            if price < mini_vasl_exit_level: 
                  final_signal = "**SELL TQQQ / CASH (Mini-VASL Exit Triggered)**"
                  trade_ticker = 'CASH'
-                 conviction_status = "Mini-VASL Triggered - Exiting TQQQ position"
+                 conviction_status = "Mini-VASL Triggered - Moving to CASH"
             else:
-                # Continue with original DMA Bull logic if Mini-VASL is NOT triggered or not holding TQQQ
+                # Continue with original DMA Bull logic if Mini-VASL is NOT triggered
                 dma_bull_ema = (ema_5 >= sma_200) # EMA CONFIRMATION FILTER
                 
                 if dma_bull_ema:
@@ -239,7 +240,7 @@ def generate_signal(indicators, current_holding_ticker=None):
                 final_signal = "**BUY SQQQ**"
                 trade_ticker = INVERSE_TICKER
 
-    return final_signal, trade_ticker, conviction_status, vasl_trigger_level
+    return final_signal, trade_ticker, conviction_status, vasl_trigger_level, mini_vasl_exit_level
 
 # --- Backtesting Engine ---
 
@@ -288,6 +289,7 @@ class BacktestEngine:
             atr = prev_data['ATR']
 
             vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)
+            mini_vasl_exit_level = ema_5 - (0.5 * atr) # Mini-VASL calculation
             
             # --- Signal Logic Based on Day N-1 Data ---
             
@@ -301,9 +303,9 @@ class BacktestEngine:
                 if dma_bull_price:
                     # --- START DMA BULL REGIME ---
                     
-                    # **NEW RULE: Mini-VASL Exit (Only if holding TQQQ)**
-                    mini_vasl_exit_level = ema_5 - (0.5 * atr)
-                    if current_ticker_historical == LEVERAGED_TICKER and price < mini_vasl_exit_level:
+                    # **MODIFIED RULE: Mini-VASL Exit**
+                    # Mini-VASL now triggers an exit to CASH regardless of current position status
+                    if price < mini_vasl_exit_level: 
                          trade_ticker = 'CASH'
                     else:
                         # Continue with original DMA Bull logic
@@ -629,7 +631,7 @@ def display_app():
     
     st.set_page_config(page_title="TQQQ/SQQQ Signal", layout="wide")
     st.title("📈 TQQQ/SQQQ Daily Signal Generator & Full History Backtester")
-    st.markdown("Strategy priority: **1. VASL** $\implies$ **2. DMA** (TQQQ exit via **Mini-VASL**) $\implies$ **3. Inverse EMA Exit**.")
+    st.markdown("Strategy priority: **1. VASL** $\implies$ **2. DMA** (TQQQ exit via **Mini-VASL** - *Position-Agnostic*) $\implies$ **3. Inverse EMA Exit**.")
     st.markdown("---")
 
     # 1. Data Fetch 
@@ -713,7 +715,8 @@ def display_app():
     try:
         # indicators are calculated using data UP TO target_date's close.
         indicators, data_with_indicators = calculate_indicators(data_for_backtest, target_date, final_signal_price)
-        final_signal, trade_ticker, conviction_status, vasl_trigger_level = generate_signal(indicators) 
+        # UPDATED: Capture mini_vasl_exit_level
+        final_signal, trade_ticker, conviction_status, vasl_trigger_level, mini_vasl_exit_level = generate_signal(indicators) 
     except ValueError as e: 
         st.error(f"FATAL ERROR: {e}")
         st.stop()
@@ -745,6 +748,9 @@ def display_app():
     
     level_format = col_vasl_status.error if "VASL Triggered" in conviction_status or "Mini-VASL Triggered" in conviction_status else col_vasl_status.success
     level_format(f"**VASL Trigger Level:** ${vasl_trigger_level:.2f}")
+    
+    # ADDED: Display Mini-VASL Exit Level
+    col_vasl_status.metric("Mini-VASL Exit Level (DMA Bull)", f"${mini_vasl_exit_level:.2f}")
 
     st.markdown("---")
     
