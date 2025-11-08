@@ -64,51 +64,64 @@ def get_last_closed_trading_day(end_date):
     # If a historical date is selected, assume data is available
     return end_date
 
-# --- Data Handling (FIXED) ---
+# --- Data Handling (FIXED WITH FALLBACK LOGIC) ---
 
 @st.cache_data
 def fetch_historical_data():
     """
-    Fetches QQQ, TQQQ, and SQQQ data in a single call and flattens the columns.
-    This definitively fixes the MultiIndex/Adj Close naming issues.
+    Fetches QQQ, TQQQ, and SQQQ data in a single call, applying robust fallback 
+    logic to ensure the correct adjusted close prices are found.
     """
     
     tickers = [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]
     
-    # Fetch all data for all tickers in a single call (actions=True is key)
+    # Fetch all data (actions=True ensures prices are split/dividend-adjusted)
     multi_index_data = yf.download(tickers, start=TQQQ_INCEPTION_DATE, actions=True)
     
-    # Define the columns we need and their desired flat names
-    # Key: (MultiIndex Level 0, MultiIndex Level 1) : Desired Name
-    column_mapping = {
-        # QQQ (for indicators)
+    data = pd.DataFrame()
+    
+    # --- 1. QQQ Columns (for indicators) ---
+    # Try 'Adj Close', fallback to 'Close' if missing (as 'Close' is adjusted with actions=True)
+    qqq_adj_close_col = ('Adj Close', TICKER)
+    if qqq_adj_close_col not in multi_index_data.columns:
+        qqq_adj_close_col = ('Close', TICKER)
+        
+    required_cols_qqq = {
         ('Open', TICKER): f'{TICKER}_open',
         ('High', TICKER): f'{TICKER}_high',
         ('Low', TICKER): f'{TICKER}_low',
-        ('Close', TICKER): f'{TICKER}_close',          # For Charting
-        ('Adj Close', TICKER): f'{TICKER}_adj_close',  # For Indicators
-        
-        # TQQQ (for trading)
-        ('Open', LEVERAGED_TICKER): f'{LEVERAGED_TICKER}_open',
-        ('Adj Close', LEVERAGED_TICKER): f'{LEVERAGED_TICKER}_close', # Use Adj Close for trading close price
-        
-        # SQQQ (for trading)
-        ('Open', INVERSE_TICKER): f'{INVERSE_TICKER}_open',
-        ('Adj Close', INVERSE_TICKER): f'{INVERSE_TICKER}_close'  # Use Adj Close for trading close price
+        ('Close', TICKER): f'{TICKER}_close', # Used for chart candlestick bodies
+        qqq_adj_close_col: f'{TICKER}_adj_close', # Used for indicators and DMA logic
     }
 
-    # Create a new DataFrame with only the required columns and flattened names
-    data = pd.DataFrame()
+    # --- 2. TQQQ & SQQQ Columns (for trading) ---
+    
+    # TQQQ: Try 'Adj Close', fallback to 'Close'
+    tqqq_close_col = ('Adj Close', LEVERAGED_TICKER)
+    if tqqq_close_col not in multi_index_data.columns:
+        tqqq_close_col = ('Close', LEVERAGED_TICKER)
+        
+    # SQQQ: Try 'Adj Close', fallback to 'Close'
+    sqqq_close_col = ('Adj Close', INVERSE_TICKER)
+    if sqqq_close_col not in multi_index_data.columns:
+        sqqq_close_col = ('Close', INVERSE_TICKER)
+        
+    required_cols_trading = {
+        ('Open', LEVERAGED_TICKER): f'{LEVERAGED_TICKER}_open',
+        tqqq_close_col: f'{LEVERAGED_TICKER}_close',
+        ('Open', INVERSE_TICKER): f'{INVERSE_TICKER}_open',
+        sqqq_close_col: f'{INVERSE_TICKER}_close',
+    }
+
+    column_mapping = {**required_cols_qqq, **required_cols_trading}
+
+    # Populate the final DataFrame
     for multi_col, flat_name in column_mapping.items():
         if multi_col in multi_index_data.columns:
             data[flat_name] = multi_index_data[multi_col]
-        else:
-            # Fallback for unexpected yfinance column structure (e.g., single ticker download, which is not used here)
-            print(f"Warning: Missing column {multi_col} from yfinance data.")
-            
-    # Drop rows with any missing data (usually occurs at the start due to SQQQ/TQQQ not existing)
+
+    # Final cleanup (drops rows where QQQ/TQQQ/SQQQ data is missing at the start)
     data = data.dropna()
-    
     return data
 
 def calculate_indicators(data, target_date):
