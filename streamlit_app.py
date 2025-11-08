@@ -182,7 +182,10 @@ def calculate_indicators(data_daily, target_date, current_price):
 
 def generate_signal(indicators, current_holding_ticker=None):
     """
-    Applies the modified trading strategy logic, moving VASL checks within DMA regimes.
+    Applies the modified trading strategy logic, matching signal_generator_inv_mod.py.
+    
+    MODIFIED LOGIC: TQQQ entry/hold now requires Price >= EMA_5 AND EMA_5 >= SMA_200.
+    The previous 'HOLD TQQQ' logic is removed.
     """
     price = indicators['current_price']
     sma_200 = indicators['sma_200']
@@ -200,44 +203,40 @@ def generate_signal(indicators, current_holding_ticker=None):
     # --- START SIGNAL LOGIC ---
     trade_ticker = 'CASH'
     conviction_status = "N/A"
-    
+    final_signal = "**CASH (Default)**"
+
     # 1. DMA REGIME CHECK
     dma_bull_price = (price >= sma_200)
     
     if dma_bull_price:
         # --- START DMA BULL REGIME (TQQQ Focus) ---
-        
+        dma_bull_ema = (ema_5 >= sma_200)
+        price_above_ema = (price >= ema_5) # NEW CONDITION
+
         # PRIORITY 1: VASL Exit (Move to CASH)
         if price < vasl_trigger_level:
-            final_signal = "**SELL TQQQ/SQQQ / CASH (DMA Bull - VASL Triggered)**"
             trade_ticker = 'CASH'
-            conviction_status = "DMA Bull - VASL Triggered - Move to CASH"
+            conviction_status = "DMA Bull - VASL Triggered"
+            final_signal = "**SELL TQQQ/SQQQ / CASH (DMA Bull - VASL Triggered)**"
             
         # PRIORITY 2: Mini-VASL Exit (Move to CASH)
         elif price < mini_vasl_exit_level: 
-             final_signal = "**SELL TQQQ/SQQQ / CASH (DMA Bull - Mini-VASL Exit Triggered)**"
              trade_ticker = 'CASH'
-             conviction_status = "DMA Bull - Mini-VASL Triggered - Moving to CASH"
+             conviction_status = "DMA Bull - Mini-VASL Exit"
+             final_signal = "**SELL TQQQ/SQQQ / CASH (DMA Bull - Mini-VASL Exit Triggered)**"
         
-        # PRIORITY 3: DMA Bull Entry/Hold
+        # PRIORITY 3: DMA Entry/Hold (If no volatility exit triggered)
         else:
-            dma_bull_ema = (ema_5 >= sma_200) # EMA CONFIRMATION FILTER
-            
-            if dma_bull_ema:
-                # DMA: BULL (Price AND EMA confirm momentum) -> ENTRY/HOLD TQQQ
-                conviction_status = "DMA - Bull (LONG TQQQ confirmed by 5EMA)"
-                final_signal = "**BUY TQQQ**"
+            # ENHANCED LOGIC: Require Price >= EMA_5 AND EMA_5 >= SMA_200
+            if dma_bull_ema and price_above_ema:
                 trade_ticker = LEVERAGED_TICKER
+                conviction_status = "DMA - Bull (TQQQ Entry/Hold Confirmed)"
+                final_signal = "**BUY TQQQ**"
             else:
-                # EMA LAGGING: If already in TQQQ, HOLD. Otherwise, CASH (based on original logic)
-                if current_holding_ticker == LEVERAGED_TICKER:
-                    conviction_status = "DMA - Hold TQQQ (Price Bullish, EMA lagging but not exit condition)"
-                    final_signal = "**HOLD TQQQ**"
-                    trade_ticker = LEVERAGED_TICKER
-                else:
-                    conviction_status = "DMA - Neutral (TQQQ Entry Filter Failed: 5EMA lagging)"
-                    final_signal = "**CASH (TQQQ Entry Filter Failed)**"
-                    trade_ticker = 'CASH'
+                # If filter fails, move to CASH (removing the HOLD logic)
+                trade_ticker = 'CASH'
+                conviction_status = "DMA - Bull (TQQQ Entry Filters Failed: Price or EMA lagging)"
+                final_signal = "**CASH (TQQQ Entry Filters Failed)**"
                     
     else: # dma_bull_price is False (Price < 200 SMA)
         # --- START DMA BEAR REGIME (SQQQ Focus) ---
@@ -280,6 +279,9 @@ class BacktestEngine:
     def generate_historical_signals(self):
         """
         Generates the trading signal for every day in the history using lookahead-free logic.
+        
+        MODIFIED: Implements the stricter Price >= EMA_5 condition for TQQQ entry/hold 
+        and removes the special 'HOLD' logic when EMA is lagging, matching signal_generator_inv_mod.py.
         """
         # 1. Calculate all indicators on the existing data
         self.df.ta.sma(length=SMA_PERIOD, append=True)
@@ -295,7 +297,7 @@ class BacktestEngine:
         
         # 3. Initialize signal and tracking
         self.df['Trade_Ticker'] = 'CASH' # Default is CASH
-        current_ticker_historical = 'CASH'
+        # current_ticker_historical tracking is REMOVED as the HOLD state is removed.
         
         # Start from the second day, as the first day's shifted indicators are NaN
         for index in self.df.index[1:]: 
@@ -304,7 +306,6 @@ class BacktestEngine:
             
             # If indicators are not yet calculated (i.e., less than SMA_PERIOD days)
             if pd.isna(prev_data[f'SMA_{SMA_PERIOD}']):
-                current_ticker_historical = 'CASH'
                 continue
                 
             # Previous day's QQQ Close price (The trigger price - Lookahead Free)
@@ -326,6 +327,8 @@ class BacktestEngine:
             
             if dma_bull_price:
                 # --- START DMA BULL REGIME (TQQQ Focus) ---
+                dma_bull_ema = (ema_5 >= sma_200) 
+                price_above_ema = (price >= ema_5) # NEW CONDITION
                 
                 # PRIORITY 1: VASL Exit
                 if price < vasl_trigger_level:
@@ -335,16 +338,13 @@ class BacktestEngine:
                 elif price < mini_vasl_exit_level: 
                      trade_ticker = 'CASH'
                 
-                # PRIORITY 3: DMA Bull Entry/Hold
+                # PRIORITY 3: DMA Bull Entry/Hold (Stricter logic)
                 else:
-                    dma_bull_ema = (ema_5 >= sma_200) 
-                    
-                    if dma_bull_ema:
-                        # TQQQ ENTRY/HOLD
+                    # ENHANCED LOGIC: Require Price >= EMA_5 AND EMA_5 >= SMA_200
+                    if dma_bull_ema and price_above_ema:
                         trade_ticker = LEVERAGED_TICKER
                     else:
-                        # EMA LAGGING: If already in TQQQ, HOLD. Otherwise, CASH.
-                        trade_ticker = LEVERAGED_TICKER if current_ticker_historical == LEVERAGED_TICKER else 'CASH'
+                        trade_ticker = 'CASH' # If filter fails, move to CASH
                         
             else: # dma_bull_price is False (Price < 200 SMA)
                 # --- START DMA BEAR REGIME (SQQQ Focus) ---
@@ -366,7 +366,6 @@ class BacktestEngine:
                     trade_ticker = INVERSE_TICKER 
             
             self.df.loc[index, 'Trade_Ticker'] = trade_ticker
-            current_ticker_historical = trade_ticker # Update holding for the next day's check
 
         self.df.dropna(subset=[f'SMA_{SMA_PERIOD}', 'Trade_Ticker'], inplace=True)
         return self.df
@@ -676,7 +675,7 @@ def display_app():
     
     st.set_page_config(page_title="TQQQ/SQQQ Signal", layout="wide")
     st.title("📈 TQQQ/SQQQ Daily Signal Generator & Full History Backtester (Modified Logic)")
-    st.markdown("**New Strategy Priority:** **1. DMA Regime** $\implies$ **2. Volatility Stop** (VASL/Mini-VASL Downside in Bull) / **Inverse Volatility Stop** (Inverse VASL/Mini-VASL Upside in Bear) $\implies$ **3. EMA Confirmation**.")
+    st.markdown("**New Strategy Priority:** **1. DMA Regime** $\implies$ **2. Volatility Stop** (VASL/Mini-VASL Downside in Bull) / **Inverse Volatility Stop** (Inverse VASL/Mini-VASL Upside in Bear) $\implies$ **3. EMA & Price Confirmation**.")
     st.markdown("---")
 
     # 1. Data Fetch 
@@ -768,6 +767,7 @@ def display_app():
         # indicators are calculated using data UP TO target_date's close.
         indicators, data_with_indicators = calculate_indicators(data_for_backtest, target_date, final_signal_price)
         # UPDATED: Capture all new inverse levels
+        # The 'current_holding_ticker' argument is now unused by the logic.
         final_signal, trade_ticker, conviction_status, vasl_trigger_level, mini_vasl_exit_level, inverse_vasl_level, inverse_mini_vasl_level = generate_signal(indicators) 
     except ValueError as e: 
         st.error(f"FATAL ERROR: {e}")
