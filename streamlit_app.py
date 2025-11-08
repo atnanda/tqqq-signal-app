@@ -64,56 +64,50 @@ def get_last_closed_trading_day(end_date):
     # If a historical date is selected, assume data is available
     return end_date
 
-# --- Data Handling ---
+# --- Data Handling (FIXED) ---
 
 @st.cache_data
 def fetch_historical_data():
     """
     Fetches QQQ, TQQQ, and SQQQ data in a single call and flattens the columns.
-    FIXES: The issue where 'Adj Close' is not found due to MultiIndex columns.
+    This definitively fixes the MultiIndex/Adj Close naming issues.
     """
     
     tickers = [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]
     
-    # Fetch all data for all tickers in a single call
-    # actions=True ensures split/dividend-adjusted prices are used.
-    data = yf.download(tickers, start=TQQQ_INCEPTION_DATE, actions=True)
+    # Fetch all data for all tickers in a single call (actions=True is key)
+    multi_index_data = yf.download(tickers, start=TQQQ_INCEPTION_DATE, actions=True)
     
-    # Flatten the MultiIndex columns
-    # The new columns will be in the format: 'Close_QQQ', 'Adj Close_TQQQ', etc.
-    data.columns = [f"{col[0]}_{col[1]}" for col in data.columns]
-    
-    # --- Rename columns to the format the rest of the script expects ---
-    
-    # 1. QQQ Columns (main index for indicators)
-    data = data.rename(columns={
-        f'Open_{TICKER}': f'{TICKER}_open',
-        f'High_{TICKER}': f'{TICKER}_high',
-        f'Low_{TICKER}': f'{TICKER}_low',
-        f'Close_{TICKER}': f'{TICKER}_close',
-        f'Adj Close_{TICKER}': f'{TICKER}_adj_close'
-    })
-    
-    # 2. Leveraged Columns (for trading)
-    data = data.rename(columns={
-        f'Open_{LEVERAGED_TICKER}': f'{LEVERAGED_TICKER}_open',
-        f'Adj Close_{LEVERAGED_TICKER}': f'{LEVERAGED_TICKER}_close' # Use Adj Close for trade close price
-    })
-    
-    # 3. Inverse Columns (for trading)
-    data = data.rename(columns={
-        f'Open_{INVERSE_TICKER}': f'{INVERSE_TICKER}_open',
-        f'Adj Close_{INVERSE_TICKER}': f'{INVERSE_TICKER}_close' # Use Adj Close for trade close price
-    })
+    # Define the columns we need and their desired flat names
+    # Key: (MultiIndex Level 0, MultiIndex Level 1) : Desired Name
+    column_mapping = {
+        # QQQ (for indicators)
+        ('Open', TICKER): f'{TICKER}_open',
+        ('High', TICKER): f'{TICKER}_high',
+        ('Low', TICKER): f'{TICKER}_low',
+        ('Close', TICKER): f'{TICKER}_close',          # For Charting
+        ('Adj Close', TICKER): f'{TICKER}_adj_close',  # For Indicators
+        
+        # TQQQ (for trading)
+        ('Open', LEVERAGED_TICKER): f'{LEVERAGED_TICKER}_open',
+        ('Adj Close', LEVERAGED_TICKER): f'{LEVERAGED_TICKER}_close', # Use Adj Close for trading close price
+        
+        # SQQQ (for trading)
+        ('Open', INVERSE_TICKER): f'{INVERSE_TICKER}_open',
+        ('Adj Close', INVERSE_TICKER): f'{INVERSE_TICKER}_close'  # Use Adj Close for trading close price
+    }
 
-    # Keep only necessary columns and drop rows with any missing data
-    required_cols = [
-        f'{TICKER}_open', f'{TICKER}_high', f'{TICKER}_low', f'{TICKER}_close', f'{TICKER}_adj_close',
-        f'{LEVERAGED_TICKER}_open', f'{LEVERAGED_TICKER}_close',
-        f'{INVERSE_TICKER}_open', f'{INVERSE_TICKER}_close'
-    ]
-    
-    data = data[required_cols].dropna()
+    # Create a new DataFrame with only the required columns and flattened names
+    data = pd.DataFrame()
+    for multi_col, flat_name in column_mapping.items():
+        if multi_col in multi_index_data.columns:
+            data[flat_name] = multi_index_data[multi_col]
+        else:
+            # Fallback for unexpected yfinance column structure (e.g., single ticker download, which is not used here)
+            print(f"Warning: Missing column {multi_col} from yfinance data.")
+            
+    # Drop rows with any missing data (usually occurs at the start due to SQQQ/TQQQ not existing)
+    data = data.dropna()
     
     return data
 
