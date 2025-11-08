@@ -205,13 +205,13 @@ def generate_signal(indicators, current_holding_ticker=None):
             # Price is Bullish (Above 200-SMA)
             
             # **MODIFIED RULE: Mini-VASL Exit (DMA Bull, price drops near 5-EMA minus 0.5*ATR)**
-            # Mini-VASL triggers an exit to CASH regardless of current position status
-            if price < mini_vasl_exit_level: 
+            # Mini-VASL triggers an exit to CASH only if currently in TQQQ (to prevent re-entry flip-flop)
+            if price < mini_vasl_exit_level and current_holding_ticker == LEVERAGED_TICKER: 
                  final_signal = "**SELL TQQQ / CASH (Mini-VASL Exit Triggered)**"
                  trade_ticker = 'CASH'
                  conviction_status = "Mini-VASL Triggered - Moving to CASH"
             else:
-                # Continue with original DMA Bull logic if Mini-VASL is NOT triggered
+                # Continue with original DMA Bull logic if Mini-VASL is NOT triggered or not holding TQQQ
                 dma_bull_ema = (ema_5 >= sma_200) # EMA CONFIRMATION FILTER
                 
                 if dma_bull_ema:
@@ -260,6 +260,9 @@ class BacktestEngine:
     def generate_historical_signals(self):
         """
         Generates the trading signal for every day in the history using lookahead-free logic.
+        
+        FIX: The Mini-VASL exit now only triggers if the strategy is currently holding TQQQ
+             (current_ticker_historical == LEVERAGED_TICKER), preventing immediate re-entry.
         """
         # 1. Calculate all indicators on the existing data
         self.df.ta.sma(length=SMA_PERIOD, append=True)
@@ -310,9 +313,9 @@ class BacktestEngine:
                 if dma_bull_price:
                     # --- START DMA BULL REGIME ---
                     
-                    # **MODIFIED RULE: Mini-VASL Exit**
-                    # Mini-VASL now triggers an exit to CASH regardless of current position status
-                    if price < mini_vasl_exit_level: 
+                    # **FIXED RULE: Mini-VASL Exit**
+                    # Mini-VASL now triggers an exit to CASH only if currently holding TQQQ
+                    if price < mini_vasl_exit_level and current_ticker_historical == LEVERAGED_TICKER: 
                          trade_ticker = 'CASH'
                     else:
                         # Continue with original DMA Bull logic
@@ -638,7 +641,7 @@ def display_app():
     
     st.set_page_config(page_title="TQQQ/SQQQ Signal", layout="wide")
     st.title("📈 TQQQ/SQQQ Daily Signal Generator & Full History Backtester")
-    st.markdown("Strategy priority: **1. VASL** $\implies$ **2. DMA** (TQQQ exit via **Mini-VASL** - *Position-Agnostic*) $\implies$ **3. Inverse EMA Exit**.")
+    st.markdown("Strategy priority: **1. VASL** $\implies$ **2. DMA** (TQQQ exit via **Mini-VASL** - *Position-Specific*) $\implies$ **3. Inverse EMA Exit**.")
     st.markdown("---")
 
     # 1. Data Fetch 
