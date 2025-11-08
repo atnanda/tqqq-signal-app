@@ -355,7 +355,6 @@ class BacktestEngine:
         if self.current_asset != "CASH" and not sim_data.empty:
             final_close_price = Decimal(sim_data.iloc[-1][f'{self.current_asset}_close'])
             final_value = self.portfolio_shares * final_close_price
-            # Append the final holding value as the last row
             self.trade_history.append({
                 'Date': sim_data.index[-1].date(), 'Action': f"HOLDING VALUE",
                 'Asset': self.current_asset, 'Price': float(final_close_price),
@@ -398,7 +397,7 @@ def run_backtests(data_with_indicators, target_date):
 
         final_value, buy_and_hold_qqq, current_trade_history_df, sim_df = backtester.run_simulation(first_trade_day)
 
-        # QQQ B&H Value Series Calculation (for risk metrics)
+        # --- QQQ B&H Value Series Calculation (for risk metrics) ---
         qqq_close_col = f'{TICKER}_adj_close'
         sim_data = data_with_indicators[data_with_indicators.index.date >= first_trade_day].copy()
         
@@ -408,7 +407,7 @@ def run_backtests(data_with_indicators, target_date):
         else:
             qqq_value_series = pd.Series([float(INITIAL_INVESTMENT)])
         
-        # Risk Metrics Calculation
+        # --- Risk Metrics Calculation ---
         if not sim_df.empty:
             strategy_mdd, strategy_sharpe = calculate_risk_metrics(sim_df['Portfolio_Value'])
             bh_mdd, bh_sharpe = calculate_risk_metrics(qqq_value_series)
@@ -420,6 +419,7 @@ def run_backtests(data_with_indicators, target_date):
         profit_loss = final_value - initial_float
         bh_profit_loss = buy_and_hold_qqq - initial_float
         
+        # --- CAGR CALCULATION ---
         # Determine the actual duration of the trade/holding period
         duration_days = (sim_data.index[-1].date() - first_trade_day).days if not sim_data.empty else 0
         duration_years = duration_days / 365.25
@@ -529,7 +529,7 @@ def display_app():
     st.title("TQQQ/SQQQ Dual Moving Average (DMA) Signal")
     st.caption("Strategy based on QQQ Price, 200-Day SMA, 5-Day EMA, and Volatility-Adjusted Stop-Loss (VASL).")
     
-    # --- 1. Sidebar for Inputs (Restored Original Layout) ---
+    # --- 1. Sidebar for Inputs ---
     with st.sidebar:
         st.header("⚙️ Settings")
         
@@ -620,7 +620,7 @@ def display_app():
     # --- 4. Signal Generation ---
     final_signal = generate_signal(final_indicators)
 
-    # --- 5. Display Signal (Restored Original Layout: Two Columns) ---
+    # --- 5. Display Signal ---
     col1, col2 = st.columns([1, 2])
 
     with col1:
@@ -653,7 +653,7 @@ def display_app():
 
     st.markdown("---")
     
-    # --- 7. Backtesting Results (Restored Original Layout) ---
+    # --- 7. Backtesting Results ---
     st.header("🧪 Strategy Backtest Performance (vs. QQQ Buy & Hold)")
     
     backtest_results, trade_history_df = run_backtests(data_with_indicators, target_date)
@@ -667,7 +667,7 @@ def display_app():
         df_results['Strategy CAGR'] = df_results['Strategy CAGR'].map(lambda x: f"{'+' if x >= 0 else ''}{x:,.2f}%")
         df_results['B&H CAGR'] = df_results['B&H CAGR'].map(lambda x: f"{'+' if x >= 0 else ''}{x:,.2f}%")
         
-        # New Formatting for Risk Metrics (MDD and Sharpe)
+        # New Formatting for Risk Metrics
         df_results['Strategy MDD'] = df_results['Strategy MDD'].map('{:,.2%}'.format)
         df_results['B&H MDD'] = df_results['B&H MDD'].map('{:,.2%}'.format)
         df_results['Strategy Sharpe'] = df_results['Strategy Sharpe'].map('{:,.2f}'.format)
@@ -690,7 +690,7 @@ def display_app():
 
     st.markdown("---")
     
-    # --- 8. Display Detailed Trade History (Restored Original Layout) ---
+    # --- 8. Display Detailed Trade History ---
     
     if not trade_history_df.empty:
         # Determine the start date for the header dynamically
@@ -699,26 +699,24 @@ def display_app():
         st.header(f"📜 Detailed Trade History (From {start_date_for_header.strftime('%Y-%m-%d')} to Today)")
         st.caption("**Trades listed here are executed at the Open price of the Date shown.**")
         
-        # Ensure we have a dataframe to display
-        if not trade_history_df.empty:
+        # Apply formatting
+        trade_history_df['Price'] = trade_history_df['Price'].map('${:,.2f}'.format)
+        trade_history_df['Portfolio Value'] = trade_history_df['Portfolio Value'].map('${:,.2f}'.format)
+        
+        # Use the original date format (YYYY-MM-DD)
+        st.dataframe(
+            trade_history_df, 
+            column_config={
+                "Date": st.column_config.DatetimeColumn("Date", format="%Y-%m-%d"), 
+                "Action": st.column_config.Column("Action", help="Trade action", width="small"), 
+                "Asset": st.column_config.Column("Asset", width="small")
+            },
+            hide_index=True
+        )
             
-            # Apply formatting
-            trade_history_df['Price'] = trade_history_df['Price'].map('${:,.2f}'.format)
-            trade_history_df['Portfolio Value'] = trade_history_df['Portfolio Value'].map('${:,.2f}'.format)
-            
-            st.dataframe(
-                trade_history_df, 
-                column_config={
-                    "Date": st.column_config.DatetimeColumn("Date", format="%Y-%m-%d"), 
-                    "Action": st.column_config.Column("Action", help="Trade action", width="small"), 
-                    "Asset": st.column_config.Column("Asset", width="small")
-                },
-                hide_index=True
-            )
-                
-            st.caption("This table logs every time the strategy transitions to a new position. The **final row** shows the unrealized value of the last asset held (calculated at the final day's close price).")
-        else:
-            st.info("No trades executed in the selected timeframe.")
+        st.caption("This table logs every time the strategy transitions to a new position. The **final row** shows the unrealized value of the last asset held (calculated at the final day's close price).")
+    else:
+        st.info("No trades executed in the selected timeframe.")
 
 # Run the app
 if __name__ == "__main__":
