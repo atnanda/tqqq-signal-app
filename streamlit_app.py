@@ -204,34 +204,33 @@ def generate_signal(indicators, current_holding_ticker=None):
         if dma_bull_price:
             # Price is Bullish (Above 200-SMA)
             
-            # **MODIFIED RULE: Mini-VASL Exit (DMA Bull, price drops near 5-EMA minus 0.5*ATR)**
-            # Mini-VASL triggers an exit to CASH only if currently in TQQQ (to prevent re-entry flip-flop)
+            # **FIXED RULE (1): Mini-VASL Exit (Only triggers a SELL if currently holding TQQQ)**
             if price < mini_vasl_exit_level and current_holding_ticker == LEVERAGED_TICKER: 
                  final_signal = "**SELL TQQQ / CASH (Mini-VASL Exit Triggered)**"
                  trade_ticker = 'CASH'
                  conviction_status = "Mini-VASL Triggered - Moving to CASH"
             else:
-                # Continue with original DMA Bull logic if Mini-VASL is NOT triggered or not holding TQQQ
+                # Continue with DMA Bull logic (Check for Entry/Hold)
                 dma_bull_ema = (ema_5 >= sma_200) # EMA CONFIRMATION FILTER
                 
-                if dma_bull_ema:
-                    # DMA: BULL (Price AND EMA confirm momentum) -> ENTRY/HOLD TQQQ
-                    conviction_status = "DMA - Bull (LONG TQQQ confirmed by 5EMA)"
-                    final_signal = "**BUY TQQQ**"
+                if current_holding_ticker == LEVERAGED_TICKER:
+                    # HOLD TQQQ: Mini-VASL not triggered, and Price >= 200 SMA is met.
+                    conviction_status = "DMA - Hold TQQQ"
+                    final_signal = "**HOLD TQQQ**"
                     trade_ticker = LEVERAGED_TICKER
                 else:
-                    # DMA: Neutral (Price is bull, but 5EMA is lagging 200SMA)
-                    
-                    if current_holding_ticker == LEVERAGED_TICKER:
-                        # RETAIN: If already in TQQQ, this condition (EMA lag) is NOT an exit rule.
-                        conviction_status = "DMA - Hold TQQQ (Price Bullish, EMA lagging but not exit condition)"
-                        final_signal = "**HOLD TQQQ**"
+                    # NEW ENTRY (CASH): Apply stricter filter for TQQQ Entry.
+                    # Requires EMA filter (5EMA >= 200SMA) AND Price >= 5EMA (Momentum Striction).
+                    if dma_bull_ema and price >= ema_5:
+                        conviction_status = "DMA - Bull (LONG TQQQ confirmed by 5EMA & Price)"
+                        final_signal = "**BUY TQQQ**"
                         trade_ticker = LEVERAGED_TICKER
                     else:
-                        # CASH: If not in TQQQ, the strict entry rule fails.
-                        conviction_status = "DMA - Neutral (TQQQ Entry Filter Failed: 5EMA lagging)"
+                        # Entry filters not met
+                        conviction_status = "DMA - Neutral (TQQQ Entry Filters Failed)"
                         final_signal = "**CASH (TQQQ Entry Filter Failed)**"
                         trade_ticker = 'CASH'
+
         else: # dma_bull_price is False (Price < 200 SMA)
             # DMA: BEAR - Check PRIORITY 3
             
@@ -261,8 +260,8 @@ class BacktestEngine:
         """
         Generates the trading signal for every day in the history using lookahead-free logic.
         
-        FIX: The Mini-VASL exit now only triggers if the strategy is currently holding TQQQ
-             (current_ticker_historical == LEVERAGED_TICKER), preventing immediate re-entry.
+        FIX: Updated DMA Bull Entry logic to require Price >= 5-EMA for a new entry (when current_ticker_historical == 'CASH'), 
+             preventing immediate re-entry after a Mini-VASL exit.
         """
         # 1. Calculate all indicators on the existing data
         self.df.ta.sma(length=SMA_PERIOD, append=True)
@@ -313,20 +312,24 @@ class BacktestEngine:
                 if dma_bull_price:
                     # --- START DMA BULL REGIME ---
                     
-                    # **FIXED RULE: Mini-VASL Exit**
-                    # Mini-VASL now triggers an exit to CASH only if currently holding TQQQ
+                    # **FIXED RULE (1): Mini-VASL Exit** (Only triggers a SELL if currently holding TQQQ)
                     if price < mini_vasl_exit_level and current_ticker_historical == LEVERAGED_TICKER: 
                          trade_ticker = 'CASH'
                     else:
-                        # Continue with original DMA Bull logic
+                        # Continue with original DMA Bull logic (Check for Entry/Hold)
                         dma_bull_ema = (ema_5 >= sma_200) 
                         
-                        if dma_bull_ema:
-                            # TQQQ ENTRY/HOLD
+                        if current_ticker_historical == LEVERAGED_TICKER:
+                            # HOLD TQQQ: Mini-VASL not triggered, and Price >= 200 SMA is met.
                             trade_ticker = LEVERAGED_TICKER
                         else:
-                            # EMA LAGGING: If already in TQQQ, HOLD. Otherwise, CASH.
-                            trade_ticker = LEVERAGED_TICKER if current_ticker_historical == LEVERAGED_TICKER else 'CASH'
+                            # NEW ENTRY (CASH): Check for Entry Striction.
+                            # FIX (2): Requires EMA filter AND Price to be above 5-EMA.
+                            if dma_bull_ema and price >= ema_5:
+                                trade_ticker = LEVERAGED_TICKER
+                            else:
+                                # Entry filters not met
+                                trade_ticker = 'CASH'
                 else: # dma_bull_price is False (Price < 200 SMA)
                     # DMA: BEAR - Check PRIORITY 3
                     
@@ -583,7 +586,7 @@ def create_chart(df, indicators):
     signal_date_index = df_plot.index[df_plot.index.date == signal_date].max()
 
     if pd.notna(signal_date_index):
-        # 1a. Add vertical line for the signal date (FIX: Added name to shape for legend)
+        # 1a. Add vertical line for the signal date
         fig.add_shape(
             type="line",
             x0=signal_date_index,
@@ -592,7 +595,6 @@ def create_chart(df, indicators):
             y1=df_plot['high'].max(),
             line=dict(color="yellow", width=2, dash="dash"),
             layer="below", 
-            # Adding a trace with mode='markers' and setting hoverinfo='skip' is the standard Plotly way to add a legend entry for a shape.
         )
         # FIX: Add an invisible scatter trace for the vertical line legend
         fig.add_trace(go.Scatter(
@@ -673,11 +675,10 @@ def display_app():
         # MAX_VALUE is now set to calendar today, allowing today's selection
         target_date = st.date_input("Select Signal Date (Close Price)", value=target_date_initial, min_value=min_tradeable_date, max_value=max_input_date)
         
-        # FIX: Checkbox for override price
+        # Checkbox for override price
         override_enabled = st.checkbox("Enable QQQ Price Override", value=st.session_state['override_enabled'])
         st.session_state['override_enabled'] = override_enabled
 
-        # FIX: number_input bug fixed by providing a safe default of 0.00
         override_value = 0.00
         if override_enabled:
              # Use the last available close price as the default for the override box
@@ -698,11 +699,11 @@ def display_app():
         st.metric("ATR Period (VASL)", f"{ATR_PERIOD} days")
         st.metric("ATR Multiplier (VASL)", ATR_MULTIPLIER)
         st.metric("Backtest Capital", f"${float(INITIAL_INVESTMENT):,.2f}")
-        # FIX: UX polish
+        # UX polish
         st.caption(f"Full Data start: **{first_available_date.strftime('%Y-%m-%d')}**")
 
 
-    # FIX: UX polish - clearer info box
+    # UX polish - clearer info box
     st.info(f"Analysis running for **{target_date.strftime('%A, %B %d, %Y')}**'s closing data.")
     
     # New warning for live date selection without override
@@ -732,7 +733,7 @@ def display_app():
     try:
         # indicators are calculated using data UP TO target_date's close.
         indicators, data_with_indicators = calculate_indicators(data_for_backtest, target_date, final_signal_price)
-        # UPDATED: Capture mini_vasl_exit_level
+        # Capture mini_vasl_exit_level
         final_signal, trade_ticker, conviction_status, vasl_trigger_level, mini_vasl_exit_level = generate_signal(indicators) 
     except ValueError as e: 
         st.error(f"FATAL ERROR: {e}")
@@ -766,7 +767,7 @@ def display_app():
     level_format = col_vasl_status.error if "VASL Triggered" in conviction_status or "Mini-VASL Triggered" in conviction_status else col_vasl_status.success
     level_format(f"**VASL Trigger Level:** ${vasl_trigger_level:.2f}")
     
-    # ADDED: Display Mini-VASL Exit Level
+    # Display Mini-VASL Exit Level
     col_vasl_status.metric("Mini-VASL Exit Level (DMA Bull)", f"${mini_vasl_exit_level:.2f}")
 
     st.markdown("---")
