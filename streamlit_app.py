@@ -320,8 +320,6 @@ class BacktestEngine:
             # Indicators are taken from the PREVIOUS day's close (sim_data.iloc[i-1])
             indicators = sim_data.iloc[i-1]
             
-            # Since sim_data is pre-filtered for existing SMA_200, we don't need the SMA_200 check here.
-            # But we keep a check for safety in case of start_date issues.
             if pd.isna(indicators['SMA_200']):
                 sim_df.loc[sim_data.index[i], 'Portfolio_Value'] = float(self.portfolio_value)
                 continue
@@ -662,7 +660,8 @@ def display_app():
     
     # --- 8. Display Detailed Trade History ---
     st.header(f"📜 Detailed Trade History (From {target_date.strftime('%Y-%m-%d')} to Today)")
-    st.caption("Trades listed here are executed at the Open price of the Date shown.")
+    # Restored original styling
+    st.caption("**Trades listed here are executed at the Open price of the Date shown.**")
     
     if not trade_history_df.empty:
         
@@ -672,6 +671,7 @@ def display_app():
         st.dataframe(
             trade_history_df, 
             column_config={
+                # Restored original date format
                 "Date": st.column_config.DatetimeColumn("Date", format="%Y-%m-%d"), 
                 "Action": st.column_config.Column("Action", help="Trade action", width="small"), 
                 "Asset": st.column_config.Column("Asset", width="small")
