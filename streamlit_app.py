@@ -64,61 +64,59 @@ def get_last_closed_trading_day(end_date):
     # If a historical date is selected, assume data is available
     return end_date
 
-# --- Data Handling (FIXED WITH FALLBACK LOGIC) ---
+# --- Data Handling (FINAL ROBUST FIX) ---
 
 @st.cache_data
 def fetch_historical_data():
     """
-    Fetches QQQ, TQQQ, and SQQQ data in a single call, applying robust fallback 
-    logic to ensure the correct adjusted close prices are found.
+    Fetches QQQ, TQQQ, and SQQQ data, ensuring all required flat column names exist,
+    including robust handling for adjusted vs. unadjusted close prices.
     """
     
     tickers = [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]
-    
-    # Fetch all data (actions=True ensures prices are split/dividend-adjusted)
+    # actions=True ensures split/dividend-adjusted prices are included,
+    # often resulting in 'Adj Close' or an adjusted 'Close' column.
     multi_index_data = yf.download(tickers, start=TQQQ_INCEPTION_DATE, actions=True)
     
-    data = pd.DataFrame()
+    data = pd.DataFrame(index=multi_index_data.index)
     
-    # --- 1. QQQ Columns (for indicators) ---
-    # Try 'Adj Close', fallback to 'Close' if missing (as 'Close' is adjusted with actions=True)
-    qqq_adj_close_col = ('Adj Close', TICKER)
-    if qqq_adj_close_col not in multi_index_data.columns:
-        qqq_adj_close_col = ('Close', TICKER)
-        
-    required_cols_qqq = {
-        ('Open', TICKER): f'{TICKER}_open',
-        ('High', TICKER): f'{TICKER}_high',
-        ('Low', TICKER): f'{TICKER}_low',
-        ('Close', TICKER): f'{TICKER}_close', # Used for chart candlestick bodies
-        qqq_adj_close_col: f'{TICKER}_adj_close', # Used for indicators and DMA logic
-    }
+    # Helper to check for the preferred adjusted column name
+    def get_close_col(ticker):
+        if ('Adj Close', ticker) in multi_index_data.columns:
+            return ('Adj Close', ticker)
+        elif ('Close', ticker) in multi_index_data.columns:
+            # When Adj Close is missing, Close is usually adjusted due to actions=True
+            return ('Close', ticker)
+        else:
+            raise ValueError(f"Failed to find 'Close' or 'Adj Close' data for {ticker}.")
+
+    # --- 1. QQQ Columns (for indicators, charting, and ATR) ---
+    
+    # Standard OHLC (used for ATR and Candlestick body)
+    data[f'{TICKER}_open'] = multi_index_data[('Open', TICKER)]
+    data[f'{TICKER}_high'] = multi_index_data[('High', TICKER)]
+    data[f'{TICKER}_low'] = multi_index_data[('Low', TICKER)]
+    data[f'{TICKER}_close'] = multi_index_data[('Close', TICKER)]
+    
+    # QQQ Adjusted Close (used for DMA indicators)
+    qqq_adj_col = get_close_col(TICKER)
+    # If QQQ_close is already adjusted and not separately named 'Adj Close',
+    # we copy the value to the required column name.
+    if qqq_adj_col == ('Close', TICKER):
+         data[f'{TICKER}_adj_close'] = data[f'{TICKER}_close']
+    else:
+        data[f'{TICKER}_adj_close'] = multi_index_data[qqq_adj_col]
 
     # --- 2. TQQQ & SQQQ Columns (for trading) ---
-    
-    # TQQQ: Try 'Adj Close', fallback to 'Close'
-    tqqq_close_col = ('Adj Close', LEVERAGED_TICKER)
-    if tqqq_close_col not in multi_index_data.columns:
-        tqqq_close_col = ('Close', LEVERAGED_TICKER)
-        
-    # SQQQ: Try 'Adj Close', fallback to 'Close'
-    sqqq_close_col = ('Adj Close', INVERSE_TICKER)
-    if sqqq_close_col not in multi_index_data.columns:
-        sqqq_close_col = ('Close', INVERSE_TICKER)
-        
-    required_cols_trading = {
-        ('Open', LEVERAGED_TICKER): f'{LEVERAGED_TICKER}_open',
-        tqqq_close_col: f'{LEVERAGED_TICKER}_close',
-        ('Open', INVERSE_TICKER): f'{INVERSE_TICKER}_open',
-        sqqq_close_col: f'{INVERSE_TICKER}_close',
-    }
 
-    column_mapping = {**required_cols_qqq, **required_cols_trading}
+    # TQQQ Open/Close
+    data[f'{LEVERAGED_TICKER}_open'] = multi_index_data[('Open', LEVERAGED_TICKER)]
+    data[f'{LEVERAGED_TICKER}_close'] = multi_index_data[get_close_col(LEVERAGED_TICKER)]
 
-    # Populate the final DataFrame
-    for multi_col, flat_name in column_mapping.items():
-        if multi_col in multi_index_data.columns:
-            data[flat_name] = multi_index_data[multi_col]
+    # SQQQ Open/Close
+    data[f'{INVERSE_TICKER}_open'] = multi_index_data[('Open', INVERSE_TICKER)]
+    data[f'{INVERSE_TICKER}_close'] = multi_index_data[get_close_col(INVERSE_TICKER)]
+
 
     # Final cleanup (drops rows where QQQ/TQQQ/SQQQ data is missing at the start)
     data = data.dropna()
@@ -144,6 +142,7 @@ def calculate_indicators(data, target_date):
 
     # 3. Average True Range (ATR)
     # ATR needs High, Low, and Close
+    # QQQ_close is guaranteed to exist now.
     atr = pta.atr(
         data_upto_target[f'{TICKER}_high'],
         data_upto_target[f'{TICKER}_low'],
@@ -680,8 +679,9 @@ def display_app():
     # --- 3. Indicator Calculation ---
     indicators = calculate_indicators(full_data, target_date)
     
-    # If override is active, create a new indicators object with the overridden price
-    final_price = full_data.loc[full_data.index.date == target_date, f'{TICKER}_adj_close'].iloc[-1] if not full_data.empty and target_date in full_data.index.date else None
+    # Get the correct QQQ price for display and override logic
+    target_date_index = full_data.index.date == target_date
+    final_price = full_data.loc[target_date_index, f'{TICKER}_adj_close'].iloc[-1] if not full_data.empty and target_date_index.any() else None
     
     if st.session_state['override_enabled'] and st.session_state['override_price'] is not None and indicators is not None:
         final_price = st.session_state['override_price']
