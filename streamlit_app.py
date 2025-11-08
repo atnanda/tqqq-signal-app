@@ -182,71 +182,92 @@ def calculate_indicators(data_daily, target_date, current_price):
 
 def generate_signal(indicators, current_holding_ticker=None):
     """
-    Applies the refined trading strategy logic, including the Mini-VASL exit.
+    Applies the modified trading strategy logic, moving VASL checks within DMA regimes.
     """
     price = indicators['current_price']
     sma_200 = indicators['sma_200']
     ema_5 = indicators['ema_5']
     atr = indicators['atr']
 
-    vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)
-    mini_vasl_exit_level = ema_5 - (0.5 * atr) # New Mini-VASL level
+    # Downside Volatility Stops (for DMA Bull Regime Exits)
+    vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)           # 5EMA - 2.0*ATR 
+    mini_vasl_exit_level = ema_5 - (0.5 * atr)                    # 5EMA - 0.5*ATR 
     
-    # 1. PRIORITY 1: VASL (Volatility Stop-Loss)
-    if price < vasl_trigger_level:
-        final_signal = "**SELL TQQQ/SQQQ / CASH (VASL Triggered)**"
-        trade_ticker = 'CASH'
-        conviction_status = "VASL Triggered - Move to CASH"
-    else:
-        # 2. PRIORITY 2: DMA (Directional Conviction - with strict TQQQ entry)
-        dma_bull_price = (price >= sma_200)
+    # Inverse Upside Volatility Stops (for DMA Bear Regime Exits)
+    inverse_vasl_level = ema_5 + (ATR_MULTIPLIER * atr)           # 5EMA + 2.0*ATR 
+    inverse_mini_vasl_level = ema_5 + (0.5 * atr)                 # 5EMA + 0.5*ATR 
+    
+    # --- START SIGNAL LOGIC ---
+    trade_ticker = 'CASH'
+    conviction_status = "N/A"
+    
+    # 1. DMA REGIME CHECK
+    dma_bull_price = (price >= sma_200)
+    
+    if dma_bull_price:
+        # --- START DMA BULL REGIME (TQQQ Focus) ---
         
-        if dma_bull_price:
-            # Price is Bullish (Above 200-SMA)
+        # PRIORITY 1: VASL Exit (Move to CASH)
+        if price < vasl_trigger_level:
+            final_signal = "**SELL TQQQ/SQQQ / CASH (DMA Bull - VASL Triggered)**"
+            trade_ticker = 'CASH'
+            conviction_status = "DMA Bull - VASL Triggered - Move to CASH"
             
-            # **FIXED RULE (1): Mini-VASL Exit (Only triggers a SELL if currently holding TQQQ)**
-            if price < mini_vasl_exit_level and current_holding_ticker == LEVERAGED_TICKER: 
-                 final_signal = "**SELL TQQQ / CASH (Mini-VASL Exit Triggered)**"
-                 trade_ticker = 'CASH'
-                 conviction_status = "Mini-VASL Triggered - Moving to CASH"
+        # PRIORITY 2: Mini-VASL Exit (Move to CASH)
+        elif price < mini_vasl_exit_level: 
+             final_signal = "**SELL TQQQ/SQQQ / CASH (DMA Bull - Mini-VASL Exit Triggered)**"
+             trade_ticker = 'CASH'
+             conviction_status = "DMA Bull - Mini-VASL Triggered - Moving to CASH"
+        
+        # PRIORITY 3: DMA Bull Entry/Hold
+        else:
+            dma_bull_ema = (ema_5 >= sma_200) # EMA CONFIRMATION FILTER
+            
+            if dma_bull_ema:
+                # DMA: BULL (Price AND EMA confirm momentum) -> ENTRY/HOLD TQQQ
+                conviction_status = "DMA - Bull (LONG TQQQ confirmed by 5EMA)"
+                final_signal = "**BUY TQQQ**"
+                trade_ticker = LEVERAGED_TICKER
             else:
-                # Continue with DMA Bull logic (Check for Entry/Hold)
-                dma_bull_ema = (ema_5 >= sma_200) # EMA CONFIRMATION FILTER
-                
+                # EMA LAGGING: If already in TQQQ, HOLD. Otherwise, CASH (based on original logic)
                 if current_holding_ticker == LEVERAGED_TICKER:
-                    # HOLD TQQQ: Mini-VASL not triggered, and Price >= 200 SMA is met.
-                    conviction_status = "DMA - Hold TQQQ"
+                    conviction_status = "DMA - Hold TQQQ (Price Bullish, EMA lagging but not exit condition)"
                     final_signal = "**HOLD TQQQ**"
                     trade_ticker = LEVERAGED_TICKER
                 else:
-                    # NEW ENTRY (CASH): Apply stricter filter for TQQQ Entry.
-                    # Requires EMA filter (5EMA >= 200SMA) AND Price >= 5EMA (Momentum Striction).
-                    if dma_bull_ema and price >= ema_5:
-                        conviction_status = "DMA - Bull (LONG TQQQ confirmed by 5EMA & Price)"
-                        final_signal = "**BUY TQQQ**"
-                        trade_ticker = LEVERAGED_TICKER
-                    else:
-                        # Entry filters not met
-                        conviction_status = "DMA - Neutral (TQQQ Entry Filters Failed)"
-                        final_signal = "**CASH (TQQQ Entry Filter Failed)**"
-                        trade_ticker = 'CASH'
-
-        else: # dma_bull_price is False (Price < 200 SMA)
-            # DMA: BEAR - Check PRIORITY 3
+                    conviction_status = "DMA - Neutral (TQQQ Entry Filter Failed: 5EMA lagging)"
+                    final_signal = "**CASH (TQQQ Entry Filter Failed)**"
+                    trade_ticker = 'CASH'
+                    
+    else: # dma_bull_price is False (Price < 200 SMA)
+        # --- START DMA BEAR REGIME (SQQQ Focus) ---
+        
+        # PRIORITY 1: Inverse VASL Exit (Move to CASH - Strongest Upside Stop)
+        if price > inverse_vasl_level:
+            conviction_status = "DMA - Bear, Inverse VASL Exit"
+            final_signal = "**SELL SQQQ / CASH (Inverse VASL Exit)**"
+            trade_ticker = 'CASH'
             
-            # 3. PRIORITY 3: Inverse EMA Exit (Only applies if DMA is BEAR)
-            if price > ema_5:
-                # DMA Bear, but short-term bounce above 5-Day EMA
-                conviction_status = "DMA - Bear, but Price > 5-Day EMA (Exit SQQQ)"
-                final_signal = "**SELL SQQQ / CASH (Inverse Position Exit)**"
-                trade_ticker = 'CASH'
-            else:
-                # DMA Bear, and no short-term strength (Price <= 5-Day EMA)
-                conviction_status = "DMA - Bear (BUY SQQQ)"
-                final_signal = "**BUY SQQQ**"
-                trade_ticker = INVERSE_TICKER
+        # PRIORITY 2: Inverse Mini-VASL Exit (Move to CASH - Mid Upside Stop)
+        elif price > inverse_mini_vasl_level: 
+            conviction_status = "DMA - Bear, Inverse Mini-VASL Exit"
+            final_signal = "**SELL SQQQ / CASH (Inverse Mini-VASL Exit)**"
+            trade_ticker = 'CASH'
+            
+        # PRIORITY 3: Inverse EMA Exit (Move to CASH - Weakest Upside Stop - Original Logic)
+        elif price > ema_5:
+            conviction_status = "DMA - Bear, but Price > 5-Day EMA (Exit SQQQ)"
+            final_signal = "**SELL SQQQ / CASH (Inverse Position Exit)**"
+            trade_ticker = 'CASH'
+            
+        # PRIORITY 4: SQQQ Entry/Hold
+        else:
+            conviction_status = "DMA - Bear (BUY SQQQ)"
+            final_signal = "**BUY SQQQ**"
+            trade_ticker = INVERSE_TICKER
 
-    return final_signal, trade_ticker, conviction_status, vasl_trigger_level, mini_vasl_exit_level
+    return final_signal, trade_ticker, conviction_status, vasl_trigger_level, mini_vasl_exit_level, inverse_vasl_level, inverse_mini_vasl_level
+
 
 # --- Backtesting Engine ---
 
@@ -259,9 +280,6 @@ class BacktestEngine:
     def generate_historical_signals(self):
         """
         Generates the trading signal for every day in the history using lookahead-free logic.
-        
-        FIX: Updated DMA Bull Entry logic to require Price >= 5-EMA for a new entry (when current_ticker_historical == 'CASH'), 
-             preventing immediate re-entry after a Mini-VASL exit.
         """
         # 1. Calculate all indicators on the existing data
         self.df.ta.sma(length=SMA_PERIOD, append=True)
@@ -298,46 +316,54 @@ class BacktestEngine:
             atr = prev_data['ATR']
 
             vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)
-            mini_vasl_exit_level = ema_5 - (0.5 * atr) # Mini-VASL calculation
+            mini_vasl_exit_level = ema_5 - (0.5 * atr) 
+            inverse_vasl_level = ema_5 + (ATR_MULTIPLIER * atr)
+            inverse_mini_vasl_level = ema_5 + (0.5 * atr)
             
-            # --- Signal Logic Based on Day N-1 Data ---
+            # --- Signal Logic Based on Day N-1 Data (Modified) ---
             
-            # 1. PRIORITY 1: VASL
-            if price < vasl_trigger_level:
-                trade_ticker = 'CASH'
-            else:
-                # 2. PRIORITY 2: DMA (MODIFIED ENTRY)
-                dma_bull_price = (price >= sma_200)
+            dma_bull_price = (price >= sma_200)
+            
+            if dma_bull_price:
+                # --- START DMA BULL REGIME (TQQQ Focus) ---
                 
-                if dma_bull_price:
-                    # --- START DMA BULL REGIME ---
+                # PRIORITY 1: VASL Exit
+                if price < vasl_trigger_level:
+                    trade_ticker = 'CASH'
+                
+                # PRIORITY 2: Mini-VASL Exit
+                elif price < mini_vasl_exit_level: 
+                     trade_ticker = 'CASH'
+                
+                # PRIORITY 3: DMA Bull Entry/Hold
+                else:
+                    dma_bull_ema = (ema_5 >= sma_200) 
                     
-                    # **FIXED RULE (1): Mini-VASL Exit** (Only triggers a SELL if currently holding TQQQ)
-                    if price < mini_vasl_exit_level and current_ticker_historical == LEVERAGED_TICKER: 
-                         trade_ticker = 'CASH'
+                    if dma_bull_ema:
+                        # TQQQ ENTRY/HOLD
+                        trade_ticker = LEVERAGED_TICKER
                     else:
-                        # Continue with original DMA Bull logic (Check for Entry/Hold)
-                        dma_bull_ema = (ema_5 >= sma_200) 
+                        # EMA LAGGING: If already in TQQQ, HOLD. Otherwise, CASH.
+                        trade_ticker = LEVERAGED_TICKER if current_ticker_historical == LEVERAGED_TICKER else 'CASH'
                         
-                        if current_ticker_historical == LEVERAGED_TICKER:
-                            # HOLD TQQQ: Mini-VASL not triggered, and Price >= 200 SMA is met.
-                            trade_ticker = LEVERAGED_TICKER
-                        else:
-                            # NEW ENTRY (CASH): Check for Entry Striction.
-                            # FIX (2): Requires EMA filter AND Price to be above 5-EMA.
-                            if dma_bull_ema and price >= ema_5:
-                                trade_ticker = LEVERAGED_TICKER
-                            else:
-                                # Entry filters not met
-                                trade_ticker = 'CASH'
-                else: # dma_bull_price is False (Price < 200 SMA)
-                    # DMA: BEAR - Check PRIORITY 3
+            else: # dma_bull_price is False (Price < 200 SMA)
+                # --- START DMA BEAR REGIME (SQQQ Focus) ---
+                
+                # PRIORITY 1: Inverse VASL Exit
+                if price > inverse_vasl_level:
+                    trade_ticker = 'CASH'
                     
-                    # 3. PRIORITY 3: Inverse EMA Exit
-                    if price > ema_5:
-                        trade_ticker = 'CASH' 
-                    else:
-                        trade_ticker = INVERSE_TICKER 
+                # PRIORITY 2: Inverse Mini-VASL Exit
+                elif price > inverse_mini_vasl_level:
+                    trade_ticker = 'CASH'
+                    
+                # PRIORITY 3: Inverse EMA Exit (Original Logic)
+                elif price > ema_5:
+                    trade_ticker = 'CASH' 
+                    
+                # PRIORITY 4: SQQQ Entry/Hold
+                else:
+                    trade_ticker = INVERSE_TICKER 
             
             self.df.loc[index, 'Trade_Ticker'] = trade_ticker
             current_ticker_historical = trade_ticker # Update holding for the next day's check
@@ -577,8 +603,15 @@ def create_chart(df, indicators):
 
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[f'SMA_{SMA_PERIOD}'], mode='lines', name=f'{SMA_PERIOD}-Day SMA', line=dict(color='blue', width=2)))
     fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[f'EMA_{EMA_PERIOD}'], mode='lines', name=f'{EMA_PERIOD}-Day EMA', line=dict(color='orange', width=1)))
-    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot['VASL_Level'], mode='lines', name='VASL Level', line=dict(color='red', width=1, dash='dot')))
-
+    
+    # ADDED: Add DMA Bull VASL/Mini-VASL Levels
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[f'EMA_{EMA_PERIOD}'] - (ATR_MULTIPLIER * df_plot['ATR']), mode='lines', name='DMA Bull VASL', line=dict(color='red', width=1, dash='dot')))
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[f'EMA_{EMA_PERIOD}'] - (0.5 * df_plot['ATR']), mode='lines', name='DMA Bull Mini-VASL', line=dict(color='pink', width=1, dash='dot')))
+    
+    # ADDED: Add DMA Bear Inverse VASL/Mini-VASL Levels
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[f'EMA_{EMA_PERIOD}'] + (ATR_MULTIPLIER * df_plot['ATR']), mode='lines', name='DMA Bear Inv. VASL', line=dict(color='red', width=1, dash='dash')))
+    fig.add_trace(go.Scatter(x=df_plot.index, y=df_plot[f'EMA_{EMA_PERIOD}'] + (0.5 * df_plot['ATR']), mode='lines', name='DMA Bear Inv. Mini-VASL', line=dict(color='pink', width=1, dash='dash')))
+    
     # 1. Marker for the Price/Indicator on the Historical Signal Date
     signal_date = indicators['signal_date']
     signal_price = indicators['signal_price']
@@ -586,7 +619,7 @@ def create_chart(df, indicators):
     signal_date_index = df_plot.index[df_plot.index.date == signal_date].max()
 
     if pd.notna(signal_date_index):
-        # 1a. Add vertical line for the signal date
+        # 1a. Add vertical line for the signal date 
         fig.add_shape(
             type="line",
             x0=signal_date_index,
@@ -596,7 +629,7 @@ def create_chart(df, indicators):
             line=dict(color="yellow", width=2, dash="dash"),
             layer="below", 
         )
-        # FIX: Add an invisible scatter trace for the vertical line legend
+        # Add an invisible scatter trace for the vertical line legend
         fig.add_trace(go.Scatter(
             x=[signal_date_index], 
             y=[signal_price],
@@ -642,8 +675,8 @@ def create_chart(df, indicators):
 def display_app():
     
     st.set_page_config(page_title="TQQQ/SQQQ Signal", layout="wide")
-    st.title("📈 TQQQ/SQQQ Daily Signal Generator & Full History Backtester")
-    st.markdown("Strategy priority: **1. VASL** $\implies$ **2. DMA** (TQQQ exit via **Mini-VASL** - *Position-Specific*) $\implies$ **3. Inverse EMA Exit**.")
+    st.title("📈 TQQQ/SQQQ Daily Signal Generator & Full History Backtester (Modified Logic)")
+    st.markdown("**New Strategy Priority:** **1. DMA Regime** $\implies$ **2. Volatility Stop** (VASL/Mini-VASL Downside in Bull) / **Inverse Volatility Stop** (Inverse VASL/Mini-VASL Upside in Bear) $\implies$ **3. EMA Confirmation**.")
     st.markdown("---")
 
     # 1. Data Fetch 
@@ -675,10 +708,11 @@ def display_app():
         # MAX_VALUE is now set to calendar today, allowing today's selection
         target_date = st.date_input("Select Signal Date (Close Price)", value=target_date_initial, min_value=min_tradeable_date, max_value=max_input_date)
         
-        # Checkbox for override price
+        # FIX: Checkbox for override price
         override_enabled = st.checkbox("Enable QQQ Price Override", value=st.session_state['override_enabled'])
         st.session_state['override_enabled'] = override_enabled
 
+        # FIX: number_input bug fixed by providing a safe default of 0.00
         override_value = 0.00
         if override_enabled:
              # Use the last available close price as the default for the override box
@@ -699,11 +733,11 @@ def display_app():
         st.metric("ATR Period (VASL)", f"{ATR_PERIOD} days")
         st.metric("ATR Multiplier (VASL)", ATR_MULTIPLIER)
         st.metric("Backtest Capital", f"${float(INITIAL_INVESTMENT):,.2f}")
-        # UX polish
+        # FIX: UX polish
         st.caption(f"Full Data start: **{first_available_date.strftime('%Y-%m-%d')}**")
 
 
-    # UX polish - clearer info box
+    # FIX: UX polish - clearer info box
     st.info(f"Analysis running for **{target_date.strftime('%A, %B %d, %Y')}**'s closing data.")
     
     # New warning for live date selection without override
@@ -733,8 +767,8 @@ def display_app():
     try:
         # indicators are calculated using data UP TO target_date's close.
         indicators, data_with_indicators = calculate_indicators(data_for_backtest, target_date, final_signal_price)
-        # Capture mini_vasl_exit_level
-        final_signal, trade_ticker, conviction_status, vasl_trigger_level, mini_vasl_exit_level = generate_signal(indicators) 
+        # UPDATED: Capture all new inverse levels
+        final_signal, trade_ticker, conviction_status, vasl_trigger_level, mini_vasl_exit_level, inverse_vasl_level, inverse_mini_vasl_level = generate_signal(indicators) 
     except ValueError as e: 
         st.error(f"FATAL ERROR: {e}")
         st.stop()
@@ -748,7 +782,7 @@ def display_app():
     # ... (Display Signal and Metrics) ...
     st.header(f"Daily Signal: {target_date.strftime('%Y-%m-%d')}")
     
-    if "BUY TQQQ" in final_signal: st.success(f"## {final_signal}")
+    if "BUY TQQQ" in final_signal or "HOLD TQQQ" in final_signal: st.success(f"## {final_signal}")
     elif "SQQQ" in final_signal: st.warning(f"## {final_signal}")
     else: st.error(f"## {final_signal}")
 
@@ -759,16 +793,24 @@ def display_app():
     col2.metric("200-Day SMA", f"${indicators['sma_200']:.2f}")
     col3.metric("DMA Conviction", conviction_status.split('(')[0].strip()) 
 
-    st.subheader("Volatility Stop-Loss (VASL) Details")
-    col_vasl_level, col_vasl_status = st.columns(2)
-    col_vasl_level.metric("5-Day EMA", f"${indicators['ema_5']:.2f}")
-    col_vasl_level.metric("14-Day ATR", f"${indicators['atr']:.2f}")
+    st.subheader("Volatility Stops by DMA Regime")
+    col_vasl_level, col_inv_vasl_level = st.columns(2)
+
+    # DMA Bull Stop Levels
+    col_vasl_level.metric("DMA Bull Downside Stops (TQQQ Exit)", "")
+    col_vasl_level.caption(f"**Based on:** 5-Day EMA (${indicators['ema_5']:.2f}) and 14-Day ATR (${indicators['atr']:.2f})")
     
-    level_format = col_vasl_status.error if "VASL Triggered" in conviction_status or "Mini-VASL Triggered" in conviction_status else col_vasl_status.success
-    level_format(f"**VASL Trigger Level:** ${vasl_trigger_level:.2f}")
+    level_format_bull = col_vasl_level.error if "VASL Triggered" in conviction_status or "Mini-VASL Triggered" in conviction_status else col_vasl_level.info
+    level_format_bull(f"**VASL Trigger Level (2.0x ATR):** ${vasl_trigger_level:.2f}")
+    col_vasl_level.metric("Mini-VASL Exit Level (0.5x ATR)", f"${mini_vasl_exit_level:.2f}")
     
-    # Display Mini-VASL Exit Level
-    col_vasl_status.metric("Mini-VASL Exit Level (DMA Bull)", f"${mini_vasl_exit_level:.2f}")
+    # DMA Bear Inverse Stop Levels
+    col_inv_vasl_level.metric("DMA Bear Upside Stops (SQQQ Exit)", "")
+    col_inv_vasl_level.caption(f"**Based on:** 5-Day EMA (${indicators['ema_5']:.2f}) and 14-Day ATR (${indicators['atr']:.2f})")
+    
+    level_format_bear = col_inv_vasl_level.error if "Inverse VASL" in conviction_status or "Inverse Mini-VASL" in conviction_status or "Inverse Position Exit" in conviction_status else col_inv_vasl_level.info
+    level_format_bear(f"**Inverse VASL Exit (2.0x ATR):** ${inverse_vasl_level:.2f}")
+    col_inv_vasl_level.metric("Inverse Mini-VASL Exit (0.5x ATR)", f"${inverse_mini_vasl_level:.2f}")
 
     st.markdown("---")
     
@@ -784,7 +826,6 @@ def display_app():
         chart_data.ta.ema(length=EMA_PERIOD, append=True)
         # Use the float-based helper for the chart data
         chart_data['ATR'] = calculate_true_range_and_atr_for_chart(chart_data, ATR_PERIOD)
-        chart_data['VASL_Level'] = chart_data[f'EMA_{EMA_PERIOD}'] - (ATR_MULTIPLIER * chart_data['ATR'])
         
         # Only display the last 200 trading days
         chart_data = chart_data.iloc[-200:].dropna(subset=[f'SMA_{SMA_PERIOD}', 'open']) 
