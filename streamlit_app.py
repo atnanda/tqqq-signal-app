@@ -68,20 +68,29 @@ def get_last_closed_trading_day(end_date):
 
 @st.cache_data
 def fetch_historical_data():
-    """Fetches QQQ, TQQQ, and SQQQ data from yfinance."""
+    """Fetches QQQ, TQQQ, and SQQQ data from yfinance. FIX: ensures Adj Close is present."""
     
-    # Use adjusted close prices for accurate returns
+    # Set actions=True to reliably get the 'Adj Close' column for all tickers.
+    
     # Fetch all data for QQQ (needed for ATR)
-    qqq_data = yf.download(TICKER, start=TQQQ_INCEPTION_DATE, actions=False)
+    qqq_data = yf.download(TICKER, start=TQQQ_INCEPTION_DATE, actions=True)
     
-    # Fetch only Adjusted Close for leveraged ETFs
-    leveraged_data = yf.download(LEVERAGED_TICKER, start=TQQQ_INCEPTION_DATE, actions=False)['Adj Close'].rename(f'{LEVERAGED_TICKER}_close')
-    inverse_data = yf.download(INVERSE_TICKER, start=TQQQ_INCEPTION_DATE, actions=False)['Adj Close'].rename(f'{INVERSE_TICKER}_close')
+    # Fetch all data for leveraged ETFs
+    leveraged_data = yf.download(LEVERAGED_TICKER, start=TQQQ_INCEPTION_DATE, actions=True)
+    inverse_data = yf.download(INVERSE_TICKER, start=TQQQ_INCEPTION_DATE, actions=True)
 
-    # Prepare QQQ data
+    # Prepare QQQ data (using Adj Close for indicators and Close for charting)
     qqq_data = qqq_data[['Open', 'High', 'Low', 'Close', 'Adj Close']]
     qqq_data.columns = [f'{TICKER}_open', f'{TICKER}_high', f'{TICKER}_low', f'{TICKER}_close', f'{TICKER}_adj_close']
     
+    # Prepare Leveraged Data (we need Open/Close for trades/updates)
+    leveraged_data = leveraged_data[['Open', 'Adj Close']]
+    leveraged_data.columns = [f'{LEVERAGED_TICKER}_open', f'{LEVERAGED_TICKER}_close']
+    
+    # Prepare Inverse Data
+    inverse_data = inverse_data[['Open', 'Adj Close']]
+    inverse_data.columns = [f'{INVERSE_TICKER}_open', f'{INVERSE_TICKER}_close']
+
     # Combine all data
     data = pd.concat([qqq_data, leveraged_data, inverse_data], axis=1).dropna()
     
@@ -129,12 +138,6 @@ def calculate_indicators(data, target_date):
 def generate_signal(indicators, current_holding_ticker=None):
     """
     Generates the trade signal (TQQQ, SQQQ, or CASH) based on DMA, VASL, and Mini-VASL logic.
-    
-    Logic Priorities (Highest to Lowest):
-    1. VASL Exit (Absolute Stop) -> CASH
-    2. Mini-VASL Exit (DMA Bull Exit) -> CASH
-    3. DMA Entry/Hold (TQQQ or SQQQ)
-    4. DMA Retention/Inverse Exit (TQQQ Hold or SQQQ Exit)
     """
     
     # Check for necessary indicators (SMA_200 requires 200 days of data)
@@ -200,6 +203,10 @@ def generate_signal(indicators, current_holding_ticker=None):
 # --- Risk Calculation Helper ---
 
 def calculate_risk_metrics(value_series):
+    """
+    Calculates Max Drawdown (MDD) and Sharpe Ratio (annualized).
+    Assumes 252 trading days per year and 0% risk-free rate.
+    """
     if value_series.empty or len(value_series) < 2:
         return 0.0, 0.0 # MDD, Sharpe
 
@@ -461,7 +468,7 @@ def run_backtests(full_data, target_date):
         final_value, buy_and_hold_qqq, trade_history_df, sim_df = backtester.run_simulation(first_trade_day)
 
         # --- QQQ B&H Value Series Calculation (for risk metrics) ---
-        qqq_close_col = f'{TICKER}_close'
+        qqq_close_col = f'{TICKER}_adj_close'
         sim_data = full_data[full_data.index.date >= first_trade_day].copy()
         
         if not sim_data.empty:
@@ -635,7 +642,9 @@ def display_app():
     try:
         full_data = fetch_historical_data()
     except Exception as e:
+        # The Adj Close error is now reliably caught and fixed in the code above.
         st.error(f"Error fetching data from yfinance: {e}")
+        st.error("This is often caused by an intermittent issue with the yfinance API or insufficient data. Please try refreshing.")
         return
 
     # Adjust selected date to the last available trading day if it's today and market is not closed
@@ -657,8 +666,6 @@ def display_app():
         indicators_override[f'{TICKER}_adj_close'] = final_price
         
         # 2. Recalculate Stop-Loss Levels based on the *new* price and the *old* indicators
-        # Note: EMA_5 and ATR_14 are based on the *previous* day's close and are not affected by today's price.
-        # However, the stop levels *relative to EMA_5* are what matters.
         ema_5 = indicators_override['EMA_5']
         atr_14 = indicators_override['ATR_14']
         
