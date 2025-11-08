@@ -8,7 +8,7 @@ import numpy as np
 import plotly.graph_objects as go
 import pytz
 from decimal import Decimal, getcontext
-import re # Added for pattern matching
+import re
 
 # Set precision for Decimal operations to high value (e.g., 50 places)
 getcontext().prec = 50
@@ -68,31 +68,52 @@ def get_last_closed_trading_day(end_date):
 
 @st.cache_data
 def fetch_historical_data():
-    """Fetches QQQ, TQQQ, and SQQQ data from yfinance. FIX: ensures Adj Close is present."""
+    """
+    Fetches QQQ, TQQQ, and SQQQ data in a single call and flattens the columns.
+    FIXES: The issue where 'Adj Close' is not found due to MultiIndex columns.
+    """
     
-    # Set actions=True to reliably get the 'Adj Close' column for all tickers.
+    tickers = [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]
     
-    # Fetch all data for QQQ (needed for ATR)
-    qqq_data = yf.download(TICKER, start=TQQQ_INCEPTION_DATE, actions=True)
+    # Fetch all data for all tickers in a single call
+    # actions=True ensures split/dividend-adjusted prices are used.
+    data = yf.download(tickers, start=TQQQ_INCEPTION_DATE, actions=True)
     
-    # Fetch all data for leveraged ETFs
-    leveraged_data = yf.download(LEVERAGED_TICKER, start=TQQQ_INCEPTION_DATE, actions=True)
-    inverse_data = yf.download(INVERSE_TICKER, start=TQQQ_INCEPTION_DATE, actions=True)
+    # Flatten the MultiIndex columns
+    # The new columns will be in the format: 'Close_QQQ', 'Adj Close_TQQQ', etc.
+    data.columns = [f"{col[0]}_{col[1]}" for col in data.columns]
+    
+    # --- Rename columns to the format the rest of the script expects ---
+    
+    # 1. QQQ Columns (main index for indicators)
+    data = data.rename(columns={
+        f'Open_{TICKER}': f'{TICKER}_open',
+        f'High_{TICKER}': f'{TICKER}_high',
+        f'Low_{TICKER}': f'{TICKER}_low',
+        f'Close_{TICKER}': f'{TICKER}_close',
+        f'Adj Close_{TICKER}': f'{TICKER}_adj_close'
+    })
+    
+    # 2. Leveraged Columns (for trading)
+    data = data.rename(columns={
+        f'Open_{LEVERAGED_TICKER}': f'{LEVERAGED_TICKER}_open',
+        f'Adj Close_{LEVERAGED_TICKER}': f'{LEVERAGED_TICKER}_close' # Use Adj Close for trade close price
+    })
+    
+    # 3. Inverse Columns (for trading)
+    data = data.rename(columns={
+        f'Open_{INVERSE_TICKER}': f'{INVERSE_TICKER}_open',
+        f'Adj Close_{INVERSE_TICKER}': f'{INVERSE_TICKER}_close' # Use Adj Close for trade close price
+    })
 
-    # Prepare QQQ data (using Adj Close for indicators and Close for charting)
-    qqq_data = qqq_data[['Open', 'High', 'Low', 'Close', 'Adj Close']]
-    qqq_data.columns = [f'{TICKER}_open', f'{TICKER}_high', f'{TICKER}_low', f'{TICKER}_close', f'{TICKER}_adj_close']
+    # Keep only necessary columns and drop rows with any missing data
+    required_cols = [
+        f'{TICKER}_open', f'{TICKER}_high', f'{TICKER}_low', f'{TICKER}_close', f'{TICKER}_adj_close',
+        f'{LEVERAGED_TICKER}_open', f'{LEVERAGED_TICKER}_close',
+        f'{INVERSE_TICKER}_open', f'{INVERSE_TICKER}_close'
+    ]
     
-    # Prepare Leveraged Data (we need Open/Close for trades/updates)
-    leveraged_data = leveraged_data[['Open', 'Adj Close']]
-    leveraged_data.columns = [f'{LEVERAGED_TICKER}_open', f'{LEVERAGED_TICKER}_close']
-    
-    # Prepare Inverse Data
-    inverse_data = inverse_data[['Open', 'Adj Close']]
-    inverse_data.columns = [f'{INVERSE_TICKER}_open', f'{INVERSE_TICKER}_close']
-
-    # Combine all data
-    data = pd.concat([qqq_data, leveraged_data, inverse_data], axis=1).dropna()
+    data = data[required_cols].dropna()
     
     return data
 
@@ -642,7 +663,6 @@ def display_app():
     try:
         full_data = fetch_historical_data()
     except Exception as e:
-        # The Adj Close error is now reliably caught and fixed in the code above.
         st.error(f"Error fetching data from yfinance: {e}")
         st.error("This is often caused by an intermittent issue with the yfinance API or insufficient data. Please try refreshing.")
         return
@@ -712,6 +732,7 @@ def display_app():
     # --- 6. Display Chart ---
     with col2:
         if final_indicators is not None:
+            # We use the QQQ 'Close' column for the chart, but adjusted prices for indicators/backtest
             fig = create_chart(full_data, target_date, target_price=final_price)
             st.plotly_chart(fig, use_container_width=True)
 
