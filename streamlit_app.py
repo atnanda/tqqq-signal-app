@@ -100,7 +100,7 @@ def fetch_historical_data():
             elif ('Close', ticker) in all_data.columns:
                 df_combined[f'{ticker}_close'] = all_data['Close'][ticker]
             
-            # Get Open Price for execution
+            # Get Open Price (still useful for general charting, but no longer for execution)
             if ('Open', ticker) in all_data.columns:
                  df_combined[f'{ticker}_open'] = all_data['Open'][ticker]
                 
@@ -182,10 +182,7 @@ def calculate_indicators(data_daily, target_date, current_price):
 
 def generate_signal(indicators, current_holding_ticker=None):
     """
-    Applies the modified trading strategy logic, matching signal_generator_inv_mod.py.
-    
-    MODIFIED LOGIC: TQQQ entry/hold now requires Price >= EMA_5 AND EMA_5 >= SMA_200.
-    The previous 'HOLD TQQQ' logic is removed.
+    Applies the modified trading strategy logic.
     """
     price = indicators['current_price']
     sma_200 = indicators['sma_200']
@@ -278,57 +275,50 @@ class BacktestEngine:
         
     def generate_historical_signals(self):
         """
-        Generates the trading signal for every day in the history using lookahead-free logic.
+        Generates the trading signal for every day in the history.
         
-        MODIFIED: Implements the stricter Price >= EMA_5 condition for TQQQ entry/hold 
-        and removes the special 'HOLD' logic when EMA is lagging, matching signal_generator_inv_mod.py.
+        FIXED: Signal is generated using Day N's Close price and indicators, 
+        and the trade is executed at Day N's Close price. (Live Logic)
         """
         # 1. Calculate all indicators on the existing data
         self.df.ta.sma(length=SMA_PERIOD, append=True)
         self.df.ta.ema(length=EMA_PERIOD, append=True)
         self.df['ATR'] = calculate_true_range_and_atr(self.df, ATR_PERIOD)
         
-        # 2. Shift indicators and the QQQ Close price one day forward to simulate using the *prior* day's close data
-        indicator_cols = [f'SMA_{SMA_PERIOD}', f'EMA_{EMA_PERIOD}', 'ATR', 'close']
-        
-        # DataFrame containing indicator values (and QQQ Close Price) from the previous day, aligned to the current day
-        df_prev_day_data = self.df[indicator_cols].shift(1)
-        df_prev_day_data.rename(columns={'close': 'prev_close'}, inplace=True)
+        # 2. REMOVED: Shifting indicators is no longer necessary for Close-to-Close backtesting.
         
         # 3. Initialize signal and tracking
         self.df['Trade_Ticker'] = 'CASH' # Default is CASH
-        # current_ticker_historical tracking is REMOVED as the HOLD state is removed.
         
-        # Start from the second day, as the first day's shifted indicators are NaN
-        for index in self.df.index[1:]: 
+        # Iterate over all days where indicators can be calculated
+        for index in self.df.index: 
             row = self.df.loc[index]
-            prev_data = df_prev_day_data.loc[index]
             
             # If indicators are not yet calculated (i.e., less than SMA_PERIOD days)
-            if pd.isna(prev_data[f'SMA_{SMA_PERIOD}']):
+            if pd.isna(row[f'SMA_{SMA_PERIOD}']):
                 continue
                 
-            # Previous day's QQQ Close price (The trigger price - Lookahead Free)
-            price = prev_data['prev_close'] 
+            # Current day's QQQ Close price (The trigger price - Lookahead Free for Close execution)
+            price = row['close'] 
             
-            # Previous day's indicator values
-            ema_5 = prev_data[f'EMA_{EMA_PERIOD}']
-            sma_200 = prev_data[f'SMA_{SMA_PERIOD}']
-            atr = prev_data['ATR']
+            # Current day's indicator values (Day N's Close)
+            ema_5 = row[f'EMA_{EMA_PERIOD}']
+            sma_200 = row[f'SMA_{SMA_PERIOD}']
+            atr = row['ATR']
 
             vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)
             mini_vasl_exit_level = ema_5 - (0.5 * atr) 
             inverse_vasl_level = ema_5 + (ATR_MULTIPLIER * atr)
             inverse_mini_vasl_level = ema_5 + (0.5 * atr)
             
-            # --- Signal Logic Based on Day N-1 Data (Modified) ---
+            # --- Signal Logic Based on Day N Close Data (Modified) ---
             
             dma_bull_price = (price >= sma_200)
             
             if dma_bull_price:
                 # --- START DMA BULL REGIME (TQQQ Focus) ---
                 dma_bull_ema = (ema_5 >= sma_200) 
-                price_above_ema = (price >= ema_5) # NEW CONDITION
+                price_above_ema = (price >= ema_5)
                 
                 # PRIORITY 1: VASL Exit
                 if price < vasl_trigger_level:
@@ -340,7 +330,6 @@ class BacktestEngine:
                 
                 # PRIORITY 3: DMA Bull Entry/Hold (Stricter logic)
                 else:
-                    # ENHANCED LOGIC: Require Price >= EMA_5 AND EMA_5 >= SMA_200
                     if dma_bull_ema and price_above_ema:
                         trade_ticker = LEVERAGED_TICKER
                     else:
@@ -357,7 +346,7 @@ class BacktestEngine:
                 elif price > inverse_mini_vasl_level:
                     trade_ticker = 'CASH'
                     
-                # PRIORITY 3: Inverse EMA Exit (Original Logic)
+                # PRIORITY 3: Inverse EMA Exit
                 elif price > ema_5:
                     trade_ticker = 'CASH' 
                     
@@ -365,6 +354,7 @@ class BacktestEngine:
                 else:
                     trade_ticker = INVERSE_TICKER 
             
+            # The signal (trade_ticker) is assigned to Day N
             self.df.loc[index, 'Trade_Ticker'] = trade_ticker
 
         self.df.dropna(subset=[f'SMA_{SMA_PERIOD}', 'Trade_Ticker'], inplace=True)
@@ -373,7 +363,7 @@ class BacktestEngine:
     def run_simulation(self, start_date):
         """
         Runs the $10k simulation and logs all trades. 
-        Execution: Trades execute at the current day's Open price.
+        Execution: Trades execute at the current day's Close price. (FIXED)
         """
         sim_df = self.df[self.df.index.date >= start_date].copy()
         if sim_df.empty: return float(INITIAL_INVESTMENT), 0, pd.DataFrame() 
@@ -388,21 +378,19 @@ class BacktestEngine:
             current_day = sim_df.iloc[i]
             trade_ticker = current_day['Trade_Ticker']
             
-            # FIX: Ensure all prices are converted to Decimal at entry to simulation loop
+            # FIX: Ensure all prices are converted to Decimal
             current_day_prices = {}
             for t in [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]:
-                # CLOSE price for P/L tracking (unrealized value)
+                # CLOSE price for execution AND P/L tracking
                 current_day_prices[f'{t}_close_dec'] = Decimal(str(current_day[f'{t}_close']))
-                # OPEN price for execution
-                current_day_prices[f'{t}_open_dec'] = Decimal(str(current_day[f'{t}_open']))
             
             # --- 1. HANDLE TRADE SIGNAL CHANGE ---
             if trade_ticker != current_ticker:
                 
                 # A. SELL (Exit Current Position)
                 if current_ticker != 'CASH':
-                    # Execute SELL at the current day's Open price
-                    sell_price = current_day_prices.get(f'{current_ticker}_open_dec', Decimal("0"))
+                    # Execute SELL at the current day's Close price (FIXED)
+                    sell_price = current_day_prices.get(f'{current_ticker}_close_dec', Decimal("0"))
                     if sell_price > 0:
                          realized_cash = shares * sell_price
                     else:
@@ -423,8 +411,8 @@ class BacktestEngine:
                 
                 # B. BUY (Enter New Position)
                 if trade_ticker != 'CASH':
-                    # Execute BUY at the current day's Open price
-                    buy_price = current_day_prices.get(f'{trade_ticker}_open_dec', Decimal("0"))
+                    # Execute BUY at the current day's Close price (FIXED)
+                    buy_price = current_day_prices.get(f'{trade_ticker}_close_dec', Decimal("0"))
                     
                     if buy_price > 0:
                         # Use the entire CASH amount (portfolio_value) to buy shares
@@ -445,6 +433,7 @@ class BacktestEngine:
                 current_ticker = trade_ticker
 
             # --- 2. TRACKING: UPDATE PORTFOLIO VALUE FOR THE CURRENT DAY'S CLOSE ---
+            # This step remains crucial for logging the final portfolio value for the day
             if current_ticker != 'CASH' and shares > 0:
                 # Use CLOSE price for tracking P/L (unrealized value)
                 current_price = current_day_prices.get(f'{current_ticker}_close_dec', Decimal("0"))
@@ -578,7 +567,7 @@ def run_backtests(full_data, target_date):
         
     return results, trade_history_for_signal_date
 
-# --- Plotly Charting Function ---
+# --- Plotly Charting Function (No changes needed, as it only visualizes price/indicators) ---
 
 def calculate_true_range_and_atr_for_chart(df, atr_period):
     """Re-implemented helper for chart logic, which uses float math."""
@@ -669,12 +658,12 @@ def create_chart(df, indicators):
     
     return fig
 
-# --- Streamlit Application Layout ---
+# --- Streamlit Application Layout (Minor Text Updates) ---
 
 def display_app():
     
     st.set_page_config(page_title="TQQQ/SQQQ Signal", layout="wide")
-    st.title("📈 TQQQ/SQQQ Daily Signal Generator & Full History Backtester (Modified Logic)")
+    st.title("📈 TQQQ/SQQQ Daily Signal Generator & Full History Backtester (Close Execution)")
     st.markdown("**New Strategy Priority:** **1. DMA Regime** $\implies$ **2. Volatility Stop** (VASL/Mini-VASL Downside in Bull) / **Inverse Volatility Stop** (Inverse VASL/Mini-VASL Upside in Bear) $\implies$ **3. EMA & Price Confirmation**.")
     st.markdown("---")
 
@@ -767,7 +756,6 @@ def display_app():
         # indicators are calculated using data UP TO target_date's close.
         indicators, data_with_indicators = calculate_indicators(data_for_backtest, target_date, final_signal_price)
         # UPDATED: Capture all new inverse levels
-        # The 'current_holding_ticker' argument is now unused by the logic.
         final_signal, trade_ticker, conviction_status, vasl_trigger_level, mini_vasl_exit_level, inverse_vasl_level, inverse_mini_vasl_level = generate_signal(indicators) 
     except ValueError as e: 
         st.error(f"FATAL ERROR: {e}")
@@ -848,7 +836,7 @@ def display_app():
     
     # --- 7. Display Results: AGGREGATE BACKTESTING ---
     st.header("⏱️ Backtest Performance (vs. QQQ Buy & Hold)")
-    st.markdown(f"**Simulation:** ${float(INITIAL_INVESTMENT):,.2f} initial investment traded based on **lookahead-free historical daily signals**, executed at the **next day's Open price**.")
+    st.markdown(f"**Simulation:** ${float(INITIAL_INVESTMENT):,.2f} initial investment traded based on historical daily signals, executed at the **day's Close price** (Close Execution).") # UPDATED text
 
     if backtest_results:
         df_results = pd.DataFrame(backtest_results)
@@ -872,7 +860,7 @@ def display_app():
     
     # --- 8. Display Detailed Trade History ---
     st.header(f"📜 Detailed Trade History (From {target_date.strftime('%Y-%m-%d')} to Today)")
-    st.caption("**Trades listed here are executed at the Open price of the Date shown.**")
+    st.caption("**Trades listed here are executed at the Close price of the Date shown.**") # UPDATED text
     
     if not trade_history_df.empty:
         
