@@ -328,9 +328,8 @@ def analyze_trade_pairs(trade_history_df, full_data, TICKER):
                 sell_portfolio_value = Decimal(str(row['Portfolio Value Float']))
                 profit_loss = float(sell_portfolio_value - buy_trade['buy_portfolio_value'])
                 
-                # --- COLOR FIX: Ensure categorical string is clean ---
+                # --- Ensure categorical string is clean ---
                 is_profitable = profit_loss >= 0
-                # Explicitly create clean strings
                 p_l_category = ("Profit" if is_profitable else "Loss").strip() 
                 
                 trade_pairs.append({
@@ -339,7 +338,7 @@ def analyze_trade_pairs(trade_history_df, full_data, TICKER):
                     'buy_qqq_price': buy_trade['buy_qqq_price'],
                     'sell_qqq_price': row['QQQ_Price'],
                     'profit_loss': profit_loss,
-                    'is_profitable_str': p_l_category, # Use clean string column
+                    'is_profitable_str': p_l_category, 
                     'asset': buy_trade['asset']
                 })
                 buy_trade = None
@@ -393,19 +392,19 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     ).transform_filter((alt.datum.Metric != 'close'))
 
     # 3. Trade Segments 
-    # FINAL FIX: Use P_L_Category:N with explicit domain and range in scale, 
-    # and the 'sort' parameter in the alt.Color object.
+    # FINAL ROBUST FIX: Order the domain based on the default alphabetical sort (Loss, Profit), 
+    # then map the range to the desired colors (Red, Green). This forces the correct mapping.
     segment_lines = alt.Chart(df_segments).mark_line(size=3).encode(
         x=alt.X('Date:T'),
         y=alt.Y('Price:Q'),
         detail='trade_id:N',
-        # Set column as Nominal (:N), and use sort to enforce order
         color=alt.Color('P_L_Category:N', 
                         scale=alt.Scale(
-                            domain=['Profit', 'Loss'],          # The string labels
-                            range=['#008000', '#d62728'],       # The corresponding hex codes (Green, Red)
+                            # Domain is set to the default alphabetical sort order
+                            domain=['Loss', 'Profit'],          
+                            # Range is mapped to match: Loss -> Red, Profit -> Green
+                            range=['#d62728', '#008000'],       
                         ), 
-                        sort=['Profit', 'Loss'],             # CRITICAL: Ensures 'Profit' is first (Green)
                         legend=alt.Legend(title="Trade P/L")),
         tooltip=[
             alt.Tooltip('P_L:Q', title='P/L', format='+.2f'),
@@ -541,7 +540,7 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
         ).transform_filter(alt.datum.Metric == 'close')
         indicator_lines = base.mark_line().encode(
             y=alt.Y('Price:Q'),
-            color=alt.Color('Metric:N', scale=alt.Scale(domain=[f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{PERIOD}'], range=['orange', 'blue', 'purple']), legend=alt.Legend(title="Indicator")), 
+            color=alt.Color('Metric:N', scale=alt.Scale(domain=[f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'], range=['orange', 'blue', 'purple']), legend=alt.Legend(title="Indicator")), 
             strokeDash=alt.condition(alt.datum.Metric == f'SMA_{SMA_PERIOD}', alt.value([5, 5]), alt.value([2, 2])),
         ).transform_filter((alt.datum.Metric != 'close'))
 
