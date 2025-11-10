@@ -176,6 +176,70 @@ def generate_all_historical_signals(data_daily, LEVERAGED_TICKER, MINI_VASL_MULT
     df.dropna(subset=[f'SMA_{SMA_PERIOD}', 'Trade_Ticker'], inplace=True)
     return df
 
+@st.cache_data(ttl=6*3600) # Cache the backtest simulation results
+def run_simulation(signals_df: pd.DataFrame, start_date: date, TICKER: str, LEVERAGED_TICKER: str, INVERSE_TICKER: str):
+    """
+    Performs the backtest simulation using pre-calculated signals.
+    Cached: Re-runs only if signals_df (data/parameters) or start_date changes.
+    """
+    # Use signals_df as the primary input for cache hashing
+    sim_df = signals_df[signals_df.index.date >= start_date].copy()
+    if sim_df.empty: 
+        return float(INITIAL_INVESTMENT), 0, 0, pd.DataFrame(), 'CASH', pd.DataFrame() 
+        
+    # Use native float for faster calculations in the loop
+    portfolio_value = float(INITIAL_INVESTMENT)
+    shares = 0.0
+    current_ticker = 'CASH'
+    trade_history = [] 
+    
+    trade_history.append({'Date': sim_df.index.min().date(), 'Action': "START", 'Asset': 'CASH', 'Price': 0.0, 'Portfolio Value': portfolio_value})
+
+    # B&H Setup
+    qqq_start_price = sim_df.iloc[0][f'{TICKER}_close']
+    tqqq_start_price = sim_df.iloc[0][f'{LEVERAGED_TICKER}_close']
+    initial_float = float(INITIAL_INVESTMENT)
+    sim_df['BH_QQQ_Value'] = initial_float * (sim_df[f'{TICKER}_close'] / qqq_start_price)
+    sim_df['BH_TQQQ_Value'] = initial_float * (sim_df[f'{LEVERAGED_TICKER}_close'] / tqqq_start_price)
+    
+    for i in range(len(sim_df)):
+        current_day = sim_df.iloc[i]
+        trade_ticker = current_day['Trade_Ticker'] 
+        current_day_prices = {t: current_day[f'{t}_close'] for t in [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]}
+        
+        if trade_ticker != current_ticker:
+            # SELL
+            if current_ticker != 'CASH':
+                sell_price = current_day_prices.get(current_ticker, 0.0)
+                realized_cash = shares * sell_price if sell_price > 0 else 0.0
+                portfolio_value = realized_cash
+                trade_history.append({'Date': current_day.name.date(), 'Action': f"SELL {current_ticker}", 'Asset': current_ticker, 'Price': sell_price, 'Portfolio Value': realized_cash})
+                shares = 0.0
+            
+            # BUY
+            if trade_ticker != 'CASH':
+                buy_price = current_day_prices.get(trade_ticker, 0.0)
+                if buy_price > 0 and portfolio_value > 0:
+                    shares = portfolio_value / buy_price
+                else:
+                    shares = 0.0
+                portfolio_value = shares * buy_price if shares > 0 else portfolio_value
+                trade_history.append({'Date': current_day.name.date(), 'Action': f"BUY {trade_ticker}", 'Asset': trade_ticker, 'Price': buy_price, 'Portfolio Value': portfolio_value})
+                    
+            current_ticker = trade_ticker
+
+        # TRACKING
+        if current_ticker != 'CASH' and shares > 0:
+            current_price = current_day_prices.get(current_ticker, 0.0)
+            portfolio_value = shares * current_price
+        
+        sim_df.loc[current_day.name, 'Portfolio_Value'] = portfolio_value 
+
+    final_holding = current_ticker
+    final_value = portfolio_value
+
+    return final_value, sim_df['BH_QQQ_Value'].iloc[-1], sim_df['BH_TQQQ_Value'].iloc[-1], pd.DataFrame(trade_history), final_holding, sim_df
+
 def generate_signal(indicators, LEVERAGED_TICKER, MINI_VASL_MULTIPLIER):
     """Applies the trading strategy logic."""
     price = indicators['current_price'] 
@@ -288,6 +352,7 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     plot_data = plot_data[plot_data.index.date >= ytd_start_date].copy()
     
     # Re-calculate SMA_SHORT_PERIOD for plotting purposes (needed for plot display)
+    # Note: signals_df only contains SMA_PERIOD and EMA_PERIOD from the backtest
     plot_data.ta.sma(length=SMA_SHORT_PERIOD, append=True)
     
     price_cols = ['close', f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'] 
@@ -329,71 +394,6 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
 
     return (price_line + indicator_lines + segment_lines).interactive()
 
-class BacktestEngine:
-    """Modified to accept the pre-computed signals DataFrame."""
-    def __init__(self, signals_df, LEVERAGED_TICKER):
-        # Use the signals_df calculated by the cached function
-        self.df = signals_df.copy()
-        self.LEVERAGED_TICKER = LEVERAGED_TICKER
-        
-    @st.cache_data(ttl=6*3600) # Cache the backtest simulation results
-    def run_simulation(self, start_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER):
-        sim_df = self.df[self.df.index.date >= start_date].copy()
-        if sim_df.empty: 
-            return float(INITIAL_INVESTMENT), 0, 0, pd.DataFrame(), 'CASH', pd.DataFrame() 
-            
-        # Use native float for faster calculations in the loop
-        portfolio_value = float(INITIAL_INVESTMENT)
-        shares = 0.0
-        current_ticker = 'CASH'
-        trade_history = [] 
-        
-        trade_history.append({'Date': sim_df.index.min().date(), 'Action': "START", 'Asset': 'CASH', 'Price': 0.0, 'Portfolio Value': portfolio_value})
-
-        # B&H Setup
-        qqq_start_price = sim_df.iloc[0][f'{TICKER}_close']
-        tqqq_start_price = sim_df.iloc[0][f'{LEVERAGED_TICKER}_close']
-        initial_float = float(INITIAL_INVESTMENT)
-        sim_df['BH_QQQ_Value'] = initial_float * (sim_df[f'{TICKER}_close'] / qqq_start_price)
-        sim_df['BH_TQQQ_Value'] = initial_float * (sim_df[f'{LEVERAGED_TICKER}_close'] / tqqq_start_price)
-        
-        for i in range(len(sim_df)):
-            current_day = sim_df.iloc[i]
-            trade_ticker = current_day['Trade_Ticker'] 
-            current_day_prices = {t: current_day[f'{t}_close'] for t in [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]}
-            
-            if trade_ticker != current_ticker:
-                # SELL
-                if current_ticker != 'CASH':
-                    sell_price = current_day_prices.get(current_ticker, 0.0)
-                    realized_cash = shares * sell_price if sell_price > 0 else 0.0
-                    portfolio_value = realized_cash
-                    trade_history.append({'Date': current_day.name.date(), 'Action': f"SELL {current_ticker}", 'Asset': current_ticker, 'Price': sell_price, 'Portfolio Value': realized_cash})
-                    shares = 0.0
-                
-                # BUY
-                if trade_ticker != 'CASH':
-                    buy_price = current_day_prices.get(trade_ticker, 0.0)
-                    if buy_price > 0 and portfolio_value > 0:
-                        shares = portfolio_value / buy_price
-                    else:
-                        shares = 0.0
-                    portfolio_value = shares * buy_price if shares > 0 else portfolio_value
-                    trade_history.append({'Date': current_day.name.date(), 'Action': f"BUY {trade_ticker}", 'Asset': trade_ticker, 'Price': buy_price, 'Portfolio Value': portfolio_value})
-                        
-                current_ticker = trade_ticker
-
-            # TRACKING
-            if current_ticker != 'CASH' and shares > 0:
-                current_price = current_day_prices.get(current_ticker, 0.0)
-                portfolio_value = shares * current_price
-            
-            sim_df.loc[current_day.name, 'Portfolio_Value'] = portfolio_value 
-
-        final_holding = current_ticker
-        final_value = portfolio_value
-
-        return final_value, sim_df['BH_QQQ_Value'].iloc[-1], sim_df['BH_TQQQ_Value'].iloc[-1], pd.DataFrame(trade_history), final_holding, sim_df
 # --- Streamlit Application ---
 
 def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER, current_mini_vasl_multiplier):
@@ -424,16 +424,12 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
         signals_df = generate_all_historical_signals(full_data, LEVERAGED_TICKER, current_mini_vasl_multiplier)
         
         # 4. Run Backtest Simulation (Cached)
-        backtester = BacktestEngine(signals_df, LEVERAGED_TICKER)
-
         start_of_tradable_data = signals_df.index.min().date() 
         backtest_start = max(backtest_start_date, start_of_tradable_data) 
         
-        # Pass cache keys to run_simulation
-        final_value, bh_qqq, bh_tqqq, trade_history_df, final_holding, sim_df = backtester.run_simulation(
-            backtest_start, TICKER, LEVERAGED_TICKER, INVERSE_TICKER, 
-            hash(frozenset(signals_df.columns)), # signals_df columns/data are cached by generate_all_historical_signals, pass its hash for simulation cache dependency
-            current_mini_vasl_multiplier # Explicitly pass the multiplier as a dependency for the cache
+        # Call the standalone, cached function
+        final_value, bh_qqq, bh_tqqq, trade_history_df, final_holding, sim_df = run_simulation(
+            signals_df, backtest_start, TICKER, LEVERAGED_TICKER, INVERSE_TICKER
         )
 
         # 5. Performance Metrics Calculation
