@@ -2,10 +2,10 @@ import streamlit as st
 import pandas as pd
 import yfinance as yf
 import pandas_ta as pta
-from datetime import datetime, timedelta, date # <-- Ensure 'date' is imported
+from datetime import datetime, timedelta, date
 import numpy as np
 import warnings
-from decimal import Decimal, getcontext # <-- Ensure 'Decimal' is imported
+from decimal import Decimal, getcontext
 import pytz
 import altair as alt 
 
@@ -320,8 +320,7 @@ def analyze_trade_pairs(trade_history_df, full_data, TICKER):
             buy_trade = {
                 'buy_date': row['Date_dt'],
                 'buy_qqq_price': row['QQQ_Price'],
-                # Ensure Decimal is available here
-                'buy_portfolio_value': Decimal(str(row['Portfolio Value Float'])), 
+                'buy_portfolio_value': Decimal(str(row['Portfolio Value Float'])),
                 'asset': row['Asset']
             }
         elif action.startswith('SELL'):
@@ -329,13 +328,16 @@ def analyze_trade_pairs(trade_history_df, full_data, TICKER):
                 sell_portfolio_value = Decimal(str(row['Portfolio Value Float']))
                 profit_loss = float(sell_portfolio_value - buy_trade['buy_portfolio_value'])
                 
+                # --- COLOR FIX: Map boolean to categorical string ---
+                is_profitable_str = "Profit" if profit_loss >= 0 else "Loss"
+                
                 trade_pairs.append({
                     'buy_date': buy_trade['buy_date'],
                     'sell_date': row['Date_dt'],
                     'buy_qqq_price': buy_trade['buy_qqq_price'],
                     'sell_qqq_price': row['QQQ_Price'],
                     'profit_loss': profit_loss,
-                    'is_profitable': profit_loss >= 0, 
+                    'is_profitable_str': is_profitable_str, # Use new string column
                     'asset': buy_trade['asset']
                 })
                 buy_trade = None
@@ -345,26 +347,19 @@ def analyze_trade_pairs(trade_history_df, full_data, TICKER):
 def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_start_date):
     """
     Generates an Altair chart with dynamic date range and extended indicators, 
-    using explicit hex colors for trade segments.
+    using explicit hex colors mapped to categorical strings.
     """
     
     # --- Dynamic Chart Range Logic ---
-    # Determine the chart start date (YTD or backtest start)
     if backtest_start >= ytd_start_date:
-        # Backtest is shorter or equal to YTD, show YTD chart
         chart_start_date = ytd_start_date
         chart_title_suffix = " (YTD View)"
     else:
-        # Backtest is longer than YTD, show full backtest range
         chart_start_date = backtest_start
         chart_title_suffix = " (Full Backtest View)"
         
     plot_data = signals_df.copy()
-    
-    # Filter base data to the chosen chart start date
     plot_data = plot_data[plot_data.index.date >= chart_start_date].copy()
-    
-    # Ensure all plotting indicators are calculated for the visible range
     plot_data.ta.sma(length=SMA_SHORT_PERIOD, append=True)
     
     price_cols = ['close', f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'] 
@@ -373,10 +368,11 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     # --- Trade Segment Data (Only drawn for the backtest period) ---
     trade_segments = []
     for i, trade in enumerate(trade_pairs):
-        # Only add trades that fall within the visible chart range
         if trade['buy_date'].date() >= chart_start_date:
-            trade_segments.append({'trade_id': i, 'Date': trade['buy_date'], 'Price': trade['buy_qqq_price'], 'Is_Profitable': trade['is_profitable'], 'Signal': 'Buy', 'P_L': trade['profit_loss']})
-            trade_segments.append({'trade_id': i, 'Date': trade['sell_date'], 'Price': trade['sell_qqq_price'], 'Is_Profitable': trade['is_profitable'], 'Signal': 'Sell', 'P_L': trade['profit_loss']})
+            # Use the new categorical string column
+            is_profitable_str = trade['is_profitable_str'] 
+            trade_segments.append({'trade_id': i, 'Date': trade['buy_date'], 'Price': trade['buy_qqq_price'], 'P_L_Category': is_profitable_str, 'Signal': 'Buy', 'P_L': trade['profit_loss']})
+            trade_segments.append({'trade_id': i, 'Date': trade['sell_date'], 'Price': trade['sell_qqq_price'], 'P_L_Category': is_profitable_str, 'Signal': 'Sell', 'P_L': trade['profit_loss']})
         
     df_segments = pd.DataFrame(trade_segments)
     
@@ -388,7 +384,7 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
         y=alt.Y('Price:Q', title=f'{TICKER} Price ($)'),
     ).transform_filter(alt.datum.Metric == 'close')
     
-    # 2. Indicator Lines (Drawn for the entire visible range)
+    # 2. Indicator Lines
     indicator_lines = base.mark_line().encode(
         y=alt.Y('Price:Q'),
         color=alt.Color('Metric:N', scale=alt.Scale(domain=[f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'], range=['orange', 'blue', 'purple']), legend=alt.Legend(title="Indicator")), 
@@ -396,18 +392,19 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     ).transform_filter((alt.datum.Metric != 'close'))
 
     # 3. Trade Segments 
-    # Use hex codes for reliable Green (Profitable: #008000) and Red (Unprofitable: #d62728)
+    # FIX: Map string values "Profit" and "Loss" to hex codes
     segment_lines = alt.Chart(df_segments).mark_line(size=3).encode(
         x=alt.X('Date:T'),
         y=alt.Y('Price:Q'),
         detail='trade_id:N',
-        color=alt.Color('Is_Profitable:N', scale=alt.Scale(domain=[True, False], range=['#008000', '#d62728']), legend=alt.Legend(title="Trade P/L")),
+        # Map the new string column to specific colors
+        color=alt.Color('P_L_Category:N', scale=alt.Scale(domain=["Profit", "Loss"], range=['#008000', '#d62728']), legend=alt.Legend(title="Trade P/L")),
         tooltip=[alt.Tooltip('P_L:Q', title='P/L', format='+.2f')]
     )
 
     return (price_line + indicator_lines + segment_lines).interactive()
 
-# --- Streamlit Application ---
+# --- Streamlit Application (Rest of the functions remain the same) ---
 
 def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER, current_mini_vasl_multiplier):
     """Encapsulates the entire backtest and rendering process."""
