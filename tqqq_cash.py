@@ -272,7 +272,6 @@ def plot_trade_signals(data_daily, trade_pairs, TICKER):
     return (price_line + indicator_lines + segment_lines).interactive()
 
 class BacktestEngine:
-    # ... (Simplified methods for brevity, logic remains identical to previous step) ...
     def __init__(self, historical_data, LEVERAGED_TICKER, MINI_VASL_MULTIPLIER):
         self.df = historical_data.copy()
         self.LEVERAGED_TICKER = LEVERAGED_TICKER
@@ -428,17 +427,21 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
     st.markdown(f"**Backtest Period:** `{backtest_start.strftime('%Y-%m-%d')}` to `{last_trade_day.strftime('%Y-%m-%d')}`")
     st.markdown("---")
 
-    # --- Live Signal Section ---
+    # --- Live Signal Section (ADJUSTED FOR FIT) ---
     st.subheader("Live Trading Signal")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Signal Price Used", f"${indicators['current_price']:.2f}", help=f"Source: {price_source}")
-    col2.metric("Trade Ticker", signal_results['trade_ticker'])
-    col3.metric("Conviction", signal_results['conviction'])
     
-    st.info(f"**Final Signal:** {signal_results['signal']}")
+    # Use two columns for the most concise metrics (Price and Ticker)
+    col1, col2 = st.columns(2)
+    col1.metric("Price Used", f"${indicators['current_price']:.2f}", help=f"Source: {price_source}")
+    col2.metric("Recommended Ticker", signal_results['trade_ticker'])
 
-    # --- HIDING SECTIONS ---
-    # The data is still calculated, but the display elements are removed
+    # Use a single, full-width element for the signal and conviction
+    st.markdown("---")
+    st.markdown(f"### **Action:** `{signal_results['signal']}`")
+    st.caption(f"**Conviction:** {signal_results['conviction']}")
+    st.markdown("---")
+
+    # --- HIDING INDICATOR AND VOLATILITY SECTIONS ---
     
     # --- Performance Summary ---
     st.markdown("## 💰 Backtest Performance Summary")
@@ -519,13 +522,12 @@ def main_app():
         )
         st.caption(f"Hard Stop Multiplier: {ATR_MULTIPLIER}x ATR (Fixed)")
         
-        # NOTE: Removed the run button for auto-execution, but keep a re-run button for user convenience
         st.markdown("---")
         if st.button("Re-Run Analysis", type="primary"):
-            st.session_state['rerun'] = True # Use session state to force a re-run logic if needed, though Streamlit usually handles this.
+            # Streamlit re-runs the entire script on widget changes, but a button forces a refresh 
+            pass 
             
     # --- Auto-Run Logic ---
-    # Streamlit re-runs the entire script whenever a widget changes, so we just call the function.
     run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER, current_mini_vasl_multiplier)
 
 
