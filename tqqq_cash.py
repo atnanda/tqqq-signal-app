@@ -417,13 +417,14 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     
     # --- Altair Chart Composition ---
     
-    # 1. Selection for Independent Indicator Toggling (by default, Altair points/legends are multi-select)
-    # We use empty initialization to start with all selected.
-    selection = alt.selection_point(fields=['Metric'], bind='legend')
+    # 1. Selection for Independent Indicator Toggling (FIXED)
+    # The selection_point is defined with a unique name. This structure is the
+    # intended way to get multi-select (independent toggle) functionality on the legend.
+    selection = alt.selection_point(fields=['Metric'], bind='legend', name='MetricSelect') 
     
     base = alt.Chart(plot_data_long).encode(x=alt.X('Date:T', title='Date')).properties(title=f'{TICKER} Price and Strategy Signals{chart_title_suffix}', height=500)
     
-    # 2. Base Price Line
+    # 2. Base Price Line (Always visible)
     price_line = base.mark_line(color='gray', opacity=0.7, size=0.5).encode(
         y=alt.Y('Price:Q', title=f'{TICKER} Price ($)'),
         color=alt.value('gray'), 
@@ -625,7 +626,7 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
         base = alt.Chart(plot_data_long_no_trades).encode(x=alt.X('Date:T', title='Date')).properties(title=f'{TICKER} Price and Strategy Signals (No Trades){chart_title_suffix}', height=500)
         
         # 1. Selection for Indicator Toggling (even in no-trade scenario)
-        selection = alt.selection_point(fields=['Metric'], bind='legend')
+        selection = alt.selection_point(fields=['Metric'], bind='legend', name='MetricSelect')
         
         price_line = base.mark_line(color='gray', opacity=0.7, size=0.5).encode(
             y=alt.Y('Price:Q', title=f'{TICKER} Price ($)'),
