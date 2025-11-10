@@ -16,7 +16,7 @@ warnings.filterwarnings("ignore")
 # Strategy Parameters
 EMA_PERIOD = 5
 ATR_PERIOD = 14
-ATR_MULTIPLIER = 5.0
+ATR_MULTIPLIER = 2.0
 SMA_PERIOD = 200
 SMA_SHORT_PERIOD = 20
 INITIAL_INVESTMENT = Decimal("10000.00")
@@ -711,5 +711,6 @@ def main_app():
 
 if __name__ == "__main__":
     main_app()
+
 
 
