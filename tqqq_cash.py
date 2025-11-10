@@ -392,18 +392,19 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     ).transform_filter((alt.datum.Metric != 'close'))
 
     # 3. Trade Segments 
-    # FINAL FIX: Use P_L_Category:N with explicit domain, range, AND sort
+    # FINAL FIX: Use P_L_Category:N with explicit domain and range in scale, 
+    # AND move the 'sort' parameter to the alt.Color object.
     segment_lines = alt.Chart(df_segments).mark_line(size=3).encode(
         x=alt.X('Date:T'),
         y=alt.Y('Price:Q'),
         detail='trade_id:N',
-        # Map the categorical string column to colors
+        # Correctly apply the sort to the color encoding channel
         color=alt.Color('P_L_Category:N', 
                         scale=alt.Scale(
                             domain=['Profit', 'Loss'],          # The string labels
                             range=['#008000', '#d62728'],       # The corresponding hex codes
-                            sort=['Profit', 'Loss']             # CRITICAL: Forces Altair to respect this order
                         ), 
+                        sort=['Profit', 'Loss'],             # CRITICAL: Fix applied here
                         legend=alt.Legend(title="Trade P/L")),
         tooltip=[
             alt.Tooltip('P_L:Q', title='P/L', format='+.2f'),
