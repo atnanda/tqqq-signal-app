@@ -380,7 +380,7 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     df_segments = pd.DataFrame(trade_segments)
     
     # --- Altair Chart Composition ---
-    # FIX: Removed width='stretch' from .properties() to resolve ValidationError
+    # The chart object must NOT have a string width property, only numerical or unset.
     base = alt.Chart(plot_data_long).encode(x=alt.X('Date:T', title='Date')).properties(title=f'{TICKER} Price and Strategy Signals{chart_title_suffix}', height=500)
     
     # 1. Base Price Line
@@ -502,12 +502,13 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
     }
     df_summary = pd.DataFrame(summary_data)
     
+    # FIX: Use width='stretch' for st.dataframe
     st.dataframe(df_summary.style.format({
         'Final Value': '${:,.2f}', 
         'Total Return': '{:+.2f}%', 
         'CAGR': '{:+.2f}%', 
         'Max Drawdown': '{:,.2f}%'
-    }), hide_index=True, use_container_width=True)
+    }), hide_index=True, width='stretch')
 
     # --- Interactive Plot ---
     
@@ -524,8 +525,8 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
     if len(trade_history_df[trade_history_df['Action'].str.startswith('BUY')]) > 0:
         trade_pairs = analyze_trade_pairs(trade_history_df, full_data, TICKER)
         
-        # FIX: Replace use_container_width=True with width='stretch'
-        st.altair_chart(plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_start_date), width='stretch')
+        # FIX: Revert to use_container_width=True to avoid runtime ValidationError
+        st.altair_chart(plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_start_date), use_container_width=True)
         st.caption(chart_caption)
     else:
         # Generate the price/indicator chart even if no trades occurred, but show a warning
@@ -547,8 +548,8 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
             strokeDash=alt.condition(alt.datum.Metric == f'SMA_{SMA_PERIOD}', alt.value([5, 5]), alt.value([2, 2])),
         ).transform_filter((alt.datum.Metric != 'close'))
 
-        # FIX: Replace use_container_width=True with width='stretch'
-        st.altair_chart((price_line + indicator_lines).interactive(), width='stretch')
+        # FIX: Revert to use_container_width=True to avoid runtime ValidationError
+        st.altair_chart((price_line + indicator_lines).interactive(), use_container_width=True)
         st.warning("No trades were executed in the selected backtest period. Displaying price and indicators only.")
 
     # --- Detailed Trade History (OPTIMIZATION: Use Expander) ---
@@ -556,10 +557,11 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
         trade_history_display = trade_history_df.copy()
         trade_history_display['Date'] = trade_history_display['Date'].astype(str)
         
+        # FIX: Use width='stretch' for st.dataframe
         st.dataframe(trade_history_display.style.format({
             'Price': '${:,.2f}', 
             'Portfolio Value': '${:,.2f}'
-        }), hide_index=True, use_container_width=True)
+        }), hide_index=True, width='stretch')
         st.caption("Trades are executed at the Close price of the Date shown.")
 
 def main_app():
