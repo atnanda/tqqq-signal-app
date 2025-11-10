@@ -691,8 +691,8 @@ def main_app():
         # Ensure multiplier is used as a cache key
         current_mini_vasl_multiplier = st.number_input(
             f"Soft Stop Multiplier ({TICKER} Mini-VASL ATR)", 
-            min_value=0.5, 
-            max_value=3.0, 
+            min_value=0.0, 
+            max_value=5.0, 
             value=MINI_VASL_MULTIPLIER, 
             step=0.1,
             key='mini_vasl_mult'
@@ -711,3 +711,4 @@ def main_app():
 
 if __name__ == "__main__":
     main_app()
+
