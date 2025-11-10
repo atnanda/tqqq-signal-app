@@ -380,7 +380,8 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     df_segments = pd.DataFrame(trade_segments)
     
     # --- Altair Chart Composition ---
-    base = alt.Chart(plot_data_long).encode(x=alt.X('Date:T', title='Date')).properties(title=f'{TICKER} Price and Strategy Signals{chart_title_suffix}', width='container', height=500)
+    # FIX: Change width='container' to width='stretch' to avoid deprecation warning
+    base = alt.Chart(plot_data_long).encode(x=alt.X('Date:T', title='Date')).properties(title=f'{TICKER} Price and Strategy Signals{chart_title_suffix}', width='stretch', height=500)
     
     # 1. Base Price Line
     price_line = base.mark_line(color='gray', opacity=0.7, size=0.5).encode(
@@ -390,7 +391,8 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     # 2. Indicator Lines
     indicator_lines = base.mark_line().encode(
         y=alt.Y('Price:Q'),
-        color=alt.Color('Metric:N', scale=alt.Scale(domain=[f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{PERIOD}'], range=['orange', 'blue', 'purple']), legend=alt.Legend(title="Indicator")), 
+        # This line was already correct, using EMA_PERIOD
+        color=alt.Color('Metric:N', scale=alt.Scale(domain=[f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'], range=['orange', 'blue', 'purple']), legend=alt.Legend(title="Indicator")), 
         strokeDash=alt.condition(alt.datum.Metric == f'SMA_{SMA_PERIOD}', alt.value([5, 5]), alt.value([2, 2])),
     ).transform_filter((alt.datum.Metric != 'close'))
 
@@ -533,16 +535,18 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
             plot_data_for_display = plot_data_for_display[plot_data_for_display.index.date >= ytd_start_date].copy()
             
         plot_data_for_display.ta.sma(length=SMA_SHORT_PERIOD, append=True)
-        price_cols = ['close', f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{PERIOD}'] 
+        price_cols = ['close', f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'] 
         plot_data_long_no_trades = plot_data_for_display.reset_index().rename(columns={'index': 'Date'})[['Date'] + price_cols].melt('Date', var_name='Metric', value_name='Price')
         
-        base = alt.Chart(plot_data_long_no_trades).encode(x=alt.X('Date:T', title='Date')).properties(title=f'{TICKER} Price and Strategy Signals (No Trades){chart_title_suffix}', width='container', height=500)
+        # FIX: Change width='container' to width='stretch'
+        base = alt.Chart(plot_data_long_no_trades).encode(x=alt.X('Date:T', title='Date')).properties(title=f'{TICKER} Price and Strategy Signals (No Trades){chart_title_suffix}', width='stretch', height=500)
         price_line = base.mark_line(color='gray', opacity=0.7, size=0.5).encode(
             y=alt.Y('Price:Q', title=f'{TICKER} Price ($)'),
         ).transform_filter(alt.datum.Metric == 'close')
         indicator_lines = base.mark_line().encode(
             y=alt.Y('Price:Q'),
-            color=alt.Color('Metric:N', scale=alt.Scale(domain=[f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{PERIOD}'], range=['orange', 'blue', 'purple']), legend=alt.Legend(title="Indicator")), 
+            # FIX: EMA_{PERIOD} -> EMA_{EMA_PERIOD} to fix NameError
+            color=alt.Color('Metric:N', scale=alt.Scale(domain=[f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'], range=['orange', 'blue', 'purple']), legend=alt.Legend(title="Indicator")), 
             strokeDash=alt.condition(alt.datum.Metric == f'SMA_{SMA_PERIOD}', alt.value([5, 5]), alt.value([2, 2])),
         ).transform_filter((alt.datum.Metric != 'close'))
 
