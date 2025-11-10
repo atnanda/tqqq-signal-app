@@ -417,18 +417,20 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
     st.markdown(f"**Backtest Period:** `{backtest_start.strftime('%Y-%m-%d')}` to `{last_trade_day.strftime('%Y-%m-%d')}`")
     st.markdown("---")
     
-    # --- Action Section (MOVED AND BOLDED) ---
-    st.markdown("### **Trade Action**")
-    st.markdown(f"## :rotating_light: **{signal_results['signal']}**")
-    st.caption(f"**Conviction:** {signal_results['conviction']}")
-    st.markdown("---")
-
-    # --- Live Signal Section ---
-    st.subheader("Live Trading Signal Details")
+    # --- COMBINED Action and Live Signal Section ---
+    st.subheader("Live Trading Signal")
     
-    col1, col2 = st.columns(2)
-    col1.metric("Price Used", f"${indicators['current_price']:.2f}", help=f"Source: {price_source}")
-    col2.metric("Recommended Ticker", signal_results['trade_ticker'])
+    # Row 1: Action (Largest and most important)
+    col_action, col_ticker = st.columns([3, 1])
+    
+    col_action.markdown(f"## :rotating_light: **{signal_results['signal']}**")
+    col_ticker.markdown(f"## **{signal_results['trade_ticker']}**")
+    
+    # Row 2: Details (Smaller metrics and conviction)
+    col_price, col_conviction = st.columns([1, 1])
+    
+    col_price.metric("Price Used", f"${indicators['current_price']:.2f}", help=f"Source: {price_source}")
+    col_conviction.caption(f"**Conviction:** {signal_results['conviction']}")
 
     st.markdown("---")
 
