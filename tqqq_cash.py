@@ -386,7 +386,7 @@ def analyze_trade_pairs(trade_history_df, full_data, TICKER):
 def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_start_date, open_trade=None):
     """
     Generates an Altair chart, including trade segments for completed trades
-    and a dotted projection for the open trade, with toggleable indicators.
+    and a dotted projection for the open trade, with independently toggleable indicators.
     """
     
     # --- Dynamic Chart Range Logic ---
@@ -401,7 +401,6 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     plot_data = plot_data[plot_data.index.date >= chart_start_date].copy()
     plot_data.ta.sma(length=SMA_SHORT_PERIOD, append=True)
     
-    # Add a 'Type' column for filtering/selection later
     price_cols = ['close', f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'] 
     plot_data_long = plot_data.reset_index().rename(columns={'index': 'Date'})[['Date'] + price_cols].melt('Date', var_name='Metric', value_name='Price')
 
@@ -418,16 +417,15 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     
     # --- Altair Chart Composition ---
     
-    # 1. Selection for Indicator Toggling
-    selection = alt.selection_point(fields=['Metric'], bind='legend', name='ToggleIndicator')
+    # 1. Selection for Independent Indicator Toggling (by default, Altair points/legends are multi-select)
+    # We use empty initialization to start with all selected.
+    selection = alt.selection_point(fields=['Metric'], bind='legend')
     
     base = alt.Chart(plot_data_long).encode(x=alt.X('Date:T', title='Date')).properties(title=f'{TICKER} Price and Strategy Signals{chart_title_suffix}', height=500)
     
     # 2. Base Price Line
-    # Must explicitly set its Metric value so it is NOT included in the selection/filter, guaranteeing it's always visible
     price_line = base.mark_line(color='gray', opacity=0.7, size=0.5).encode(
         y=alt.Y('Price:Q', title=f'{TICKER} Price ($)'),
-        # Set a dummy 'Metric' value so it doesn't get filtered by the indicator selection
         color=alt.value('gray'), 
         tooltip=[alt.Tooltip('Price:Q', format='$.2f', title=f'{TICKER} Price')],
     ).transform_filter(alt.datum.Metric == 'close')
@@ -441,7 +439,8 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
             legend=alt.Legend(title="Indicator (Click to Toggle)")
         ), 
         strokeDash=alt.condition(alt.datum.Metric == f'SMA_{SMA_PERIOD}', alt.value([5, 5]), alt.value([2, 2])),
-        opacity=alt.condition(selection, alt.value(1.0), alt.value(0.1)), # Conditional opacity
+        # Opacity condition uses the selection filter
+        opacity=alt.condition(selection, alt.value(1.0), alt.value(0.1)), 
         tooltip=[alt.Tooltip('Metric:N', title='Indicator'), alt.Tooltip('Price:Q', format='$.2f', title='Value')],
     ).add_params(selection).transform_filter((alt.datum.Metric != 'close'))
 
@@ -626,7 +625,7 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
         base = alt.Chart(plot_data_long_no_trades).encode(x=alt.X('Date:T', title='Date')).properties(title=f'{TICKER} Price and Strategy Signals (No Trades){chart_title_suffix}', height=500)
         
         # 1. Selection for Indicator Toggling (even in no-trade scenario)
-        selection = alt.selection_point(fields=['Metric'], bind='legend', name='ToggleIndicator')
+        selection = alt.selection_point(fields=['Metric'], bind='legend')
         
         price_line = base.mark_line(color='gray', opacity=0.7, size=0.5).encode(
             y=alt.Y('Price:Q', title=f'{TICKER} Price ($)'),
