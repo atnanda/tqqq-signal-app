@@ -343,47 +343,58 @@ def analyze_trade_pairs(trade_history_df, full_data, TICKER):
 
 def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_start_date):
     """
-    Generates an Altair chart showing YTD price with backtest signals overlaid.
+    Generates an Altair chart with dynamic date range and extended indicators.
     """
     
+    # --- Dynamic Chart Range Logic ---
+    # Determine the chart start date (YTD or backtest start)
+    if backtest_start >= ytd_start_date:
+        # Backtest is shorter or equal to YTD, show YTD chart
+        chart_start_date = ytd_start_date
+        chart_title_suffix = " (YTD View)"
+    else:
+        # Backtest is longer than YTD, show full backtest range
+        chart_start_date = backtest_start
+        chart_title_suffix = " (Full Backtest View)"
+        
     plot_data = signals_df.copy()
     
-    # Filter base data to start from YTD start date for the chart view
-    plot_data = plot_data[plot_data.index.date >= ytd_start_date].copy()
+    # Filter base data to the chosen chart start date
+    plot_data = plot_data[plot_data.index.date >= chart_start_date].copy()
     
-    # Re-calculate SMA_SHORT_PERIOD for plotting purposes (needed for plot display)
-    # Note: signals_df only contains SMA_PERIOD and EMA_PERIOD from the backtest
+    # Ensure all plotting indicators are calculated for the visible range
+    # Note: SMA_200 and EMA_5 are already in signals_df, but SMA_20 needs recalculation
     plot_data.ta.sma(length=SMA_SHORT_PERIOD, append=True)
     
     price_cols = ['close', f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'] 
     plot_data_long = plot_data.reset_index().rename(columns={'index': 'Date'})[['Date'] + price_cols].melt('Date', var_name='Metric', value_name='Price')
 
-    # Filter indicators to ONLY be drawn for the backtest period (i.e., after backtest_start)
-    indicator_data_long = plot_data_long[plot_data_long['Date'].dt.date >= backtest_start]
-    
+    # --- Trade Segment Data (Only drawn for the backtest period) ---
     trade_segments = []
     for i, trade in enumerate(trade_pairs):
-        trade_segments.append({'trade_id': i, 'Date': trade['buy_date'], 'Price': trade['buy_qqq_price'], 'Is_Profitable': trade['is_profitable'], 'Signal': 'Buy', 'P_L': trade['profit_loss']})
-        trade_segments.append({'trade_id': i, 'Date': trade['sell_date'], 'Price': trade['sell_qqq_price'], 'Is_Profitable': trade['is_profitable'], 'Signal': 'Sell', 'P_L': trade['profit_loss']})
+        # Only add trades that fall within the visible chart range
+        if trade['buy_date'].date() >= chart_start_date:
+            trade_segments.append({'trade_id': i, 'Date': trade['buy_date'], 'Price': trade['buy_qqq_price'], 'Is_Profitable': trade['is_profitable'], 'Signal': 'Buy', 'P_L': trade['profit_loss']})
+            trade_segments.append({'trade_id': i, 'Date': trade['sell_date'], 'Price': trade['sell_qqq_price'], 'Is_Profitable': trade['is_profitable'], 'Signal': 'Sell', 'P_L': trade['profit_loss']})
         
     df_segments = pd.DataFrame(trade_segments)
     
-    base = alt.Chart(plot_data_long).encode(x=alt.X('Date:T', title='Date')).properties(title=f'{TICKER} Price and Strategy Signals (YTD View)', width='container', height=500)
+    # --- Altair Chart Composition ---
+    base = alt.Chart(plot_data_long).encode(x=alt.X('Date:T', title='Date')).properties(title=f'{TICKER} Price and Strategy Signals{chart_title_suffix}', width='container', height=500)
     
-    # 1. Base Price Line (YTD)
+    # 1. Base Price Line
     price_line = base.mark_line(color='gray', opacity=0.7, size=0.5).encode(
         y=alt.Y('Price:Q', title=f'{TICKER} Price ($)'),
     ).transform_filter(alt.datum.Metric == 'close')
     
-    # 2. Indicator Lines (Overlaid only for the backtest period)
-    indicator_lines = alt.Chart(indicator_data_long).mark_line().encode(
-        x=alt.X('Date:T'),
+    # 2. Indicator Lines (Drawn for the entire visible range)
+    indicator_lines = base.mark_line().encode(
         y=alt.Y('Price:Q'),
         color=alt.Color('Metric:N', scale=alt.Scale(domain=[f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'], range=['orange', 'blue', 'purple']), legend=alt.Legend(title="Indicator")), 
         strokeDash=alt.condition(alt.datum.Metric == f'SMA_{SMA_PERIOD}', alt.value([5, 5]), alt.value([2, 2])),
     ).transform_filter((alt.datum.Metric != 'close'))
 
-    # 3. Trade Segments (Overlaid for the backtest period)
+    # 3. Trade Segments 
     segment_lines = alt.Chart(df_segments).mark_line(size=3).encode(
         x=alt.X('Date:T'),
         y=alt.Y('Price:Q'),
@@ -393,6 +404,109 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     )
 
     return (price_line + indicator_lines + segment_lines).interactive()
+
+# --- Cache-Protected Simulation and Signal Functions (Defined above) ---
+
+def generate_signal(indicators, LEVERAGED_TICKER, MINI_VASL_MULTIPLIER):
+    """Applies the trading strategy logic."""
+    price = indicators['current_price'] 
+    sma_200 = indicators['sma_200']
+    ema_5 = indicators['ema_5']
+    atr = indicators['atr']
+
+    vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)           
+    mini_vasl_exit_level = ema_5 - (MINI_VASL_MULTIPLIER * atr)                    
+    
+    trade_ticker = 'CASH'
+    conviction_status = "N/A"
+    final_signal = "CASH (Default)" 
+
+    dma_bull_price = (price >= sma_200)
+    
+    if dma_bull_price:
+        
+        if price < vasl_trigger_level:
+            trade_ticker = 'CASH'
+            conviction_status = "DMA Bull - VASL Triggered (2.0x ATR Exit)"
+            final_signal = f"SELL {LEVERAGED_TICKER} / CASH (DMA Bull - Hard Stop)"
+            
+        elif price < mini_vasl_exit_level: 
+             trade_ticker = 'CASH'
+             conviction_status = f"DMA Bull - Mini-VASL Exit ({MINI_VASL_MULTIPLIER:.1f}x ATR Exit)"
+             final_signal = f"SELL {LEVERAGED_TICKER} / CASH (DMA Bull - Soft Stop)"
+        
+        else:
+            trade_ticker = LEVERAGED_TICKER
+            conviction_status = f"DMA - Bull ({LEVERAGED_TICKER} Entry/Hold)"
+            final_signal = f"BUY {LEVERAGED_TICKER} / HOLD {LEVERAGED_TICKER}"
+                    
+    else: 
+        conviction_status = "DMA - Bear (Stay CASH - Inverse Trading Disabled)"
+        final_signal = "CASH (Inverse Trading Disabled)"
+        trade_ticker = 'CASH'
+
+    return {
+        'signal': final_signal,
+        'trade_ticker': trade_ticker,
+        'conviction': conviction_status,
+        'vasl_down': vasl_trigger_level,
+        'mini_vasl_down': mini_vasl_exit_level,
+    }
+
+def calculate_max_drawdown(series):
+    """Calculates the Maximum Drawdown for a given series of values."""
+    if series.empty: return 0.0
+    rolling_max = series.cummax()
+    drawdown = (series - rolling_max) / rolling_max
+    return drawdown.min() * 100
+
+def analyze_trade_pairs(trade_history_df, full_data, TICKER):
+    """Processes the trade history to create Buy-Sell pairs with profit/loss."""
+    temp_df = trade_history_df.copy()
+    temp_df['Portfolio Value Float'] = temp_df['Portfolio Value'].astype(float)
+    
+    trades = temp_df[temp_df['Action'].str.startswith(('BUY', 'SELL'))].copy()
+    trades['Date_dt'] = pd.to_datetime(trades['Date'])
+
+    qqq_close_col = f'{TICKER}_close'
+    
+    trades = trades.set_index('Date_dt') 
+    trades.sort_index(inplace=True)
+    trades = trades.join(full_data[qqq_close_col], how='left')
+    trades.rename(columns={qqq_close_col: 'QQQ_Price'}, inplace=True)
+    trades = trades.reset_index()
+
+    trade_pairs = []
+    buy_trade = None
+    
+    for _, row in trades.iterrows():
+        action = row['Action']
+        
+        if action.startswith('BUY'):
+            if buy_trade: buy_trade = None 
+            buy_trade = {
+                'buy_date': row['Date_dt'],
+                'buy_qqq_price': row['QQQ_Price'],
+                'buy_portfolio_value': Decimal(str(row['Portfolio Value Float'])),
+                'asset': row['Asset']
+            }
+        elif action.startswith('SELL'):
+            if buy_trade:
+                sell_portfolio_value = Decimal(str(row['Portfolio Value Float']))
+                profit_loss = float(sell_portfolio_value - buy_trade['buy_portfolio_value'])
+                
+                trade_pairs.append({
+                    'buy_date': buy_trade['buy_date'],
+                    'sell_date': row['Date_dt'],
+                    'buy_qqq_price': buy_trade['buy_qqq_price'],
+                    'sell_qqq_price': row['QQQ_Price'],
+                    'profit_loss': profit_loss,
+                    'is_profitable': profit_loss >= 0, 
+                    'asset': buy_trade['asset']
+                })
+                buy_trade = None
+                
+    return trade_pairs
 
 # --- Streamlit Application ---
 
@@ -487,14 +601,23 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
     }), hide_index=True, use_container_width=True)
 
     # --- Interactive Plot ---
-    st.markdown("## 📈 Interactive Price and Trade Signal Chart (YTD View)")
+    
+    # Logic for dynamically setting the chart description
+    if backtest_start >= ytd_start_date:
+        chart_description = f"**Interactive Price and Trade Signal Chart (YTD View)**"
+        chart_caption = f"Chart shows YTD price with strategy indicators (extended) and trade segments overlaid for the backtest period (starting {backtest_start.strftime('%Y-%m-%d')})."
+    else:
+        chart_description = f"**Interactive Price and Trade Signal Chart (Full Backtest View)**"
+        chart_caption = f"Chart shows the full backtest period price with strategy indicators (extended) and trade segments."
+        
+    st.markdown(f"## 📈 {chart_description}")
     
     if len(trade_history_df[trade_history_df['Action'].str.startswith('BUY')]) > 0:
         trade_pairs = analyze_trade_pairs(trade_history_df, full_data, TICKER)
         
         # Pass signals_df (full data), trade_pairs, TICKER, backtest_start, and ytd_start_date
         st.altair_chart(plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_start_date), use_container_width=True)
-        st.caption(f"Chart shows YTD price with strategy indicators and trade segments overlaid for the backtest period (starting {backtest_start.strftime('%Y-%m-%d')}).")
+        st.caption(chart_caption)
     else:
         st.warning("No trades were executed in the selected backtest period.")
 
