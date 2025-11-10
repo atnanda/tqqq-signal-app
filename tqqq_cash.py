@@ -405,6 +405,7 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
         initial_float = float(INITIAL_INVESTMENT)
 
         strategy_mdd = calculate_max_drawdown(sim_df['Portfolio_Value'])
+        # NOTE: Keeping Buy & Hold calculations for the graph, just removing them from the summary table display
         bh_qqq_mdd = calculate_max_drawdown(sim_df['BH_QQQ_Value'])
         bh_tqqq_mdd = calculate_max_drawdown(sim_df['BH_TQQQ_Value'])
         
@@ -434,15 +435,15 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
 
     st.markdown("---")
 
-    # --- Performance Summary ---
+    # --- Performance Summary (MODIFIED: Only show Strategy) ---
     st.markdown("## 💰 Backtest Performance Summary")
     
     summary_data = {
-        'Metric': [f"Strategy ({LEVERAGED_TICKER})", f"{TICKER} Buy & Hold", f"{LEVERAGED_TICKER} Buy & Hold"], 
-        'Final Value': [final_value, bh_qqq, bh_tqqq],
-        'Total Return': [(final_value/initial_float - 1) * 100, (bh_qqq/initial_float - 1) * 100, (bh_tqqq/initial_float - 1) * 100], 
-        'CAGR': [strategy_cagr, bh_qqq_cagr, bh_tqqq_cagr],
-        'Max Drawdown': [strategy_mdd, bh_qqq_mdd, bh_tqqq_mdd] 
+        'Metric': [f"Strategy ({LEVERAGED_TICKER})"], # Only the Strategy row is kept
+        'Final Value': [final_value],
+        'Total Return': [(final_value/initial_float - 1) * 100], 
+        'CAGR': [strategy_cagr],
+        'Max Drawdown': [strategy_mdd] 
     }
     df_summary = pd.DataFrame(summary_data)
     
