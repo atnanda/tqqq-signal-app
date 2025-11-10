@@ -21,7 +21,6 @@ SMA_PERIOD = 200
 SMA_SHORT_PERIOD = 20
 INITIAL_INVESTMENT = Decimal("10000.00")
 TQQQ_INCEPTION_DATE = date(2010, 2, 9)
-# Performance Fix: Loosened stop to 1.5
 MINI_VASL_MULTIPLIER = 1.5 
 
 # --- Helper Functions ---
@@ -29,9 +28,7 @@ MINI_VASL_MULTIPLIER = 1.5
 def get_last_closed_trading_day():
     """Determines the most recent CLOSED trading day."""
     today = date.today()
-    # Go back a few days to ensure we land on a closed trading day
     last_day = today - timedelta(days=1)
-    # Adjust for weekend if necessary
     while last_day.weekday() > 4: # 5 is Sat, 6 is Sun
         last_day -= timedelta(days=1)
     return last_day
@@ -108,18 +105,17 @@ def calculate_indicators(data_daily, target_date, current_price):
     df.ta.ema(length=EMA_PERIOD, append=True)
     
     sma_200_col = f'SMA_{SMA_PERIOD}'
-    sma_20_col = f'SMA_{SMA_SHORT_PERIOD}'
     
     if df[sma_200_col].isnull().all():
         raise ValueError(f"Insufficient data (need {SMA_PERIOD} days) to calculate 200-Day SMA.")
         
     current_sma_200 = df[sma_200_col].iloc[-1]
-    latest_sma_20 = df[sma_20_col].iloc[-1] 
+    latest_sma_20 = df[f'SMA_{SMA_SHORT_PERIOD}'].iloc[-1] 
     latest_ema_5 = df[f'EMA_{EMA_PERIOD}'].iloc[-1]
     df['ATR'] = calculate_true_range_and_atr(df, ATR_PERIOD)
     latest_atr = df['ATR'].ffill().iloc[-1]
 
-    if not all(np.isfinite([current_sma_200, latest_sma_20, latest_ema_5, latest_atr])): 
+    if not all(np.isfinite([current_sma_200, latest_ema_5, latest_atr])): 
         raise ValueError("Indicator calculation resulted in non-numeric values.")
     
     return {
@@ -157,8 +153,6 @@ def generate_signal(indicators, LEVERAGED_TICKER, MINI_VASL_MULTIPLIER):
              trade_ticker = 'CASH'
              conviction_status = f"DMA Bull - Mini-VASL Exit ({MINI_VASL_MULTIPLIER:.1f}x ATR Exit)"
              final_signal = f"SELL {LEVERAGED_TICKER} / CASH (DMA Bull - Soft Stop)"
-        
-        # Momentum Filter (EMA5 <= SMA20) is intentionally removed
         
         else:
             trade_ticker = LEVERAGED_TICKER
@@ -246,10 +240,8 @@ def plot_trade_signals(data_daily, trade_pairs, TICKER):
         
     df_segments = pd.DataFrame(trade_segments)
     
-    # Base Chart
     base = alt.Chart(plot_data_long).encode(x=alt.X('Date:T', title='Date')).properties(title=f'{TICKER} Price and Strategy Signals', width='container', height=500)
     
-    # Price and Indicators
     price_line = base.mark_line(color='gray', opacity=0.7, size=0.5).encode(
         y=alt.Y('Price:Q', title=f'{TICKER} Price ($)'),
     ).transform_filter(alt.datum.Metric == 'close')
@@ -260,7 +252,6 @@ def plot_trade_signals(data_daily, trade_pairs, TICKER):
         strokeDash=alt.condition(alt.datum.Metric == f'SMA_{SMA_PERIOD}', alt.value([5, 5]), alt.value([2, 2])),
     ).transform_filter((alt.datum.Metric != 'close'))
 
-    # Trade Segments (Line color based on P/L)
     segment_lines = alt.Chart(df_segments).mark_line(size=3).encode(
         x=alt.X('Date:T'),
         y=alt.Y('Price:Q'),
@@ -307,7 +298,6 @@ class BacktestEngine:
                     trade_ticker = 'CASH'
                 elif price < mini_vasl_exit_level: 
                      trade_ticker = 'CASH'
-                # Momentum Filter (EMA5 <= SMA20) is intentionally removed here
                 else:
                     trade_ticker = self.LEVERAGED_TICKER
             else: 
@@ -436,7 +426,6 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
     # --- Live Signal Section ---
     st.subheader("Live Trading Signal Details")
     
-    # Use two columns for the most concise metrics (Price and Ticker)
     col1, col2 = st.columns(2)
     col1.metric("Price Used", f"${indicators['current_price']:.2f}", help=f"Source: {price_source}")
     col2.metric("Recommended Ticker", signal_results['trade_ticker'])
@@ -474,17 +463,16 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
     else:
         st.warning("No trades were executed in the selected backtest period.")
 
-    # --- Detailed Trade History ---
-    st.markdown("## 📜 Detailed Trade History")
-    
-    trade_history_display = trade_history_df.copy()
-    trade_history_display['Date'] = trade_history_display['Date'].astype(str)
-    
-    st.dataframe(trade_history_display.style.format({
-        'Price': '${:,.2f}', 
-        'Portfolio Value': '${:,.2f}'
-    }), hide_index=True, use_container_width=True)
-    st.caption("Trades are executed at the Close price of the Date shown.")
+    # --- Detailed Trade History (OPTIMIZATION: Use Expander) ---
+    with st.expander("📜 Detailed Trade History (Click to Expand)"):
+        trade_history_display = trade_history_df.copy()
+        trade_history_display['Date'] = trade_history_display['Date'].astype(str)
+        
+        st.dataframe(trade_history_display.style.format({
+            'Price': '${:,.2f}', 
+            'Portfolio Value': '${:,.2f}'
+        }), hide_index=True, use_container_width=True)
+        st.caption("Trades are executed at the Close price of the Date shown.")
 
 def main_app():
     
@@ -524,7 +512,6 @@ def main_app():
         
         st.markdown("---")
         if st.button("Re-Run Analysis", type="primary"):
-            # Streamlit re-runs the entire script on widget changes. This button acts as a manual refresh.
             pass 
             
     # --- Auto-Run Logic ---
