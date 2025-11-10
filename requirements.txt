@@ -6,3 +6,5 @@ numpy
 streamlit
 plotly
 pytz
+altair
+
