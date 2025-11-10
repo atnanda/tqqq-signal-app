@@ -386,7 +386,7 @@ def analyze_trade_pairs(trade_history_df, full_data, TICKER):
 def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_start_date, open_trade=None):
     """
     Generates an Altair chart, including trade segments for completed trades
-    and a dotted projection for the open trade.
+    and a dotted projection for the open trade, with toggleable indicators.
     """
     
     # --- Dynamic Chart Range Logic ---
@@ -401,6 +401,7 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     plot_data = plot_data[plot_data.index.date >= chart_start_date].copy()
     plot_data.ta.sma(length=SMA_SHORT_PERIOD, append=True)
     
+    # Add a 'Type' column for filtering/selection later
     price_cols = ['close', f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'] 
     plot_data_long = plot_data.reset_index().rename(columns={'index': 'Date'})[['Date'] + price_cols].melt('Date', var_name='Metric', value_name='Price')
 
@@ -416,21 +417,35 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     df_segments = pd.DataFrame(trade_segments)
     
     # --- Altair Chart Composition ---
+    
+    # 1. Selection for Indicator Toggling
+    selection = alt.selection_point(fields=['Metric'], bind='legend', name='ToggleIndicator')
+    
     base = alt.Chart(plot_data_long).encode(x=alt.X('Date:T', title='Date')).properties(title=f'{TICKER} Price and Strategy Signals{chart_title_suffix}', height=500)
     
-    # 1. Base Price Line
+    # 2. Base Price Line
+    # Must explicitly set its Metric value so it is NOT included in the selection/filter, guaranteeing it's always visible
     price_line = base.mark_line(color='gray', opacity=0.7, size=0.5).encode(
         y=alt.Y('Price:Q', title=f'{TICKER} Price ($)'),
+        # Set a dummy 'Metric' value so it doesn't get filtered by the indicator selection
+        color=alt.value('gray'), 
+        tooltip=[alt.Tooltip('Price:Q', format='$.2f', title=f'{TICKER} Price')],
     ).transform_filter(alt.datum.Metric == 'close')
     
-    # 2. Indicator Lines
+    # 3. Indicator Lines (TOGGLEABLE)
     indicator_lines = base.mark_line().encode(
         y=alt.Y('Price:Q'),
-        color=alt.Color('Metric:N', scale=alt.Scale(domain=[f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'], range=['orange', 'blue', 'purple']), legend=alt.Legend(title="Indicator")), 
+        # Color encoding binds the selection for the toggle
+        color=alt.Color('Metric:N', 
+            scale=alt.Scale(domain=[f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'], range=['orange', 'blue', 'purple']), 
+            legend=alt.Legend(title="Indicator (Click to Toggle)")
+        ), 
         strokeDash=alt.condition(alt.datum.Metric == f'SMA_{SMA_PERIOD}', alt.value([5, 5]), alt.value([2, 2])),
-    ).transform_filter((alt.datum.Metric != 'close'))
+        opacity=alt.condition(selection, alt.value(1.0), alt.value(0.1)), # Conditional opacity
+        tooltip=[alt.Tooltip('Metric:N', title='Indicator'), alt.Tooltip('Price:Q', format='$.2f', title='Value')],
+    ).add_params(selection).transform_filter((alt.datum.Metric != 'close'))
 
-    # 3. Trade Segments (Completed Trades - Solid Line) 
+    # 4. Trade Segments (Completed Trades - Solid Line) 
     segment_lines = alt.Chart(df_segments).mark_line(size=3).encode(
         x=alt.X('Date:T'),
         y=alt.Y('Price:Q'),
@@ -442,16 +457,17 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
             alt.value('#d62728')  # Red
         ),
         tooltip=[
+            alt.Tooltip('Date:T', title='Trade Date'),
             alt.Tooltip('P_L:Q', title='P/L', format='+.2f'),
             alt.Tooltip('P_L_Category:N', title='Outcome'),
         ]
     )
 
-    # 4. Open Trade Projection (Dotted Line)
+    # 5. Open Trade Projection (Dotted Line)
     open_line = alt.Chart(pd.DataFrame()).mark_line(size=2, strokeDash=[5, 5]).encode(
         x='Date:T',
         y='Price:Q'
-    ).properties(title="Open Trade") # Default placeholder chart
+    ).properties(title="Open Trade") 
 
     if open_trade and open_trade['asset'] != 'CASH':
         # Create data points for the open trade line using QQQ prices for plotting
@@ -467,7 +483,6 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
             open_line = alt.Chart(open_trade_data).mark_line(size=3, strokeDash=[5, 5]).encode(
                 x=alt.X('Date:T'),
                 y=alt.Y('Price:Q'),
-                # *** FIX APPLIED HERE: Use field encoding for detail, not alt.value() ***
                 detail='Trade_Type:N',
                 color=alt.condition(
                     alt.Predicate(field='P_L_Category', equal='Profit'),
@@ -484,6 +499,7 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
 
     
     return (price_line + indicator_lines + segment_lines + open_line).interactive()
+
 
 # --- Streamlit Application (Remaining functions) ---
 
@@ -582,10 +598,10 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
     # Logic for dynamically setting the chart description
     if backtest_start >= ytd_start_date:
         chart_description = f"**Interactive Price and Trade Signal Chart (YTD View)**"
-        chart_caption = f"Chart shows YTD price with strategy indicators (extended) and completed trade segments overlaid for the backtest period (starting {backtest_start.strftime('%Y-%m-%d')}). **Open positions are shown as a dotted line.**"
+        chart_caption = f"Chart shows YTD price with strategy indicators (toggleable by legend click) and completed trade segments overlaid for the backtest period (starting {backtest_start.strftime('%Y-%m-%d')}). Open positions are shown as a dotted line."
     else:
         chart_description = f"**Interactive Price and Trade Signal Chart (Full Backtest View)**"
-        chart_caption = f"Chart shows the full backtest period price with strategy indicators (extended) and completed trade segments. **Open positions are shown as a dotted line.**"
+        chart_caption = f"Chart shows the full backtest period price with strategy indicators (toggleable by legend click) and completed trade segments. Open positions are shown as a dotted line."
         
     st.markdown(f"## 📈 {chart_description}")
     
@@ -606,15 +622,29 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
         price_cols = ['close', f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'] 
         plot_data_long_no_trades = plot_data_for_display.reset_index().rename(columns={'index': 'Date'})[['Date'] + price_cols].melt('Date', var_name='Metric', value_name='Price')
         
+        # Redefine base chart for no-trade scenario
         base = alt.Chart(plot_data_long_no_trades).encode(x=alt.X('Date:T', title='Date')).properties(title=f'{TICKER} Price and Strategy Signals (No Trades){chart_title_suffix}', height=500)
+        
+        # 1. Selection for Indicator Toggling (even in no-trade scenario)
+        selection = alt.selection_point(fields=['Metric'], bind='legend', name='ToggleIndicator')
+        
         price_line = base.mark_line(color='gray', opacity=0.7, size=0.5).encode(
             y=alt.Y('Price:Q', title=f'{TICKER} Price ($)'),
+             color=alt.value('gray'), 
+             tooltip=[alt.Tooltip('Price:Q', format='$.2f', title=f'{TICKER} Price')],
         ).transform_filter(alt.datum.Metric == 'close')
+        
         indicator_lines = base.mark_line().encode(
             y=alt.Y('Price:Q'),
-            color=alt.Color('Metric:N', scale=alt.Scale(domain=[f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'], range=['orange', 'blue', 'purple']), legend=alt.Legend(title="Indicator")), 
+            color=alt.Color('Metric:N', 
+                scale=alt.Scale(domain=[f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'], range=['orange', 'blue', 'purple']), 
+                legend=alt.Legend(title="Indicator (Click to Toggle)")
+            ), 
             strokeDash=alt.condition(alt.datum.Metric == f'SMA_{SMA_PERIOD}', alt.value([5, 5]), alt.value([2, 2])),
-        ).transform_filter((alt.datum.Metric != 'close'))
+            opacity=alt.condition(selection, alt.value(1.0), alt.value(0.1)),
+            tooltip=[alt.Tooltip('Metric:N', title='Indicator'), alt.Tooltip('Price:Q', format='$.2f', title='Value')],
+        ).add_params(selection).transform_filter((alt.datum.Metric != 'close'))
+
 
         st.altair_chart((price_line + indicator_lines).interactive(), use_container_width=True)
         st.warning("No trades were executed in the selected backtest period. Displaying price and indicators only.")
