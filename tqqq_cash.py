@@ -352,7 +352,7 @@ def analyze_trade_pairs(trade_history_df, full_data, TICKER):
     if buy_trade:
         # If buy_trade is not None after the loop, it's an open position
         last_date = full_data.index.max()
-        # Use the price of the actual asset held (TQQQ) for the P/L calculation's basis
+        # Use the price of the actual asset held (TQQQ/SQQQ) for the P/L calculation's basis
         asset_close_col = f'{buy_trade["asset"]}_close'
         current_asset_price = full_data[asset_close_col].loc[last_date]
         
@@ -377,7 +377,8 @@ def analyze_trade_pairs(trade_history_df, full_data, TICKER):
             'current_date': last_date,
             'current_qqq_price': qqq_current_price,
             'asset': buy_trade['asset'],
-            'is_profitable_str': p_l_category # Profit/Loss status used for color
+            'is_profitable_str': p_l_category, # Profit/Loss status used for color
+            'Trade_Type': 'Open Position' # Identifier for the detail channel
         }
                 
     return trade_pairs, open_trade 
@@ -455,8 +456,8 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     if open_trade and open_trade['asset'] != 'CASH':
         # Create data points for the open trade line using QQQ prices for plotting
         open_trade_data = pd.DataFrame([
-            {'Date': open_trade['buy_date'], 'Price': open_trade['buy_qqq_price'], 'P_L_Category': open_trade['is_profitable_str'], 'Trade_Type': 'Open Position'},
-            {'Date': open_trade['current_date'], 'Price': open_trade['current_qqq_price'], 'P_L_Category': open_trade['is_profitable_str'], 'Trade_Type': 'Open Position'}
+            {'Date': open_trade['buy_date'], 'Price': open_trade['buy_qqq_price'], 'P_L_Category': open_trade['is_profitable_str'], 'Trade_Type': open_trade['Trade_Type']},
+            {'Date': open_trade['current_date'], 'Price': open_trade['current_qqq_price'], 'P_L_Category': open_trade['is_profitable_str'], 'Trade_Type': open_trade['Trade_Type']}
         ])
         
         # Filter for the visible chart range
@@ -466,7 +467,8 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
             open_line = alt.Chart(open_trade_data).mark_line(size=3, strokeDash=[5, 5]).encode(
                 x=alt.X('Date:T'),
                 y=alt.Y('Price:Q'),
-                detail=alt.value(1), # Treat as one continuous line
+                # *** FIX APPLIED HERE: Use field encoding for detail, not alt.value() ***
+                detail='Trade_Type:N',
                 color=alt.condition(
                     alt.Predicate(field='P_L_Category', equal='Profit'),
                     alt.value('#008000'), # Green (Profit)
