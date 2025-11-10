@@ -36,26 +36,19 @@ def get_last_closed_trading_day():
         last_day -= timedelta(days=1)
     return last_day
 
+def get_default_ytd_start_date(today_date):
+    """Returns January 1st of the current year."""
+    return date(today_date.year, 1, 1)
+
 @st.cache_data(ttl=24*3600) # Cache data for 24 hours
 def fetch_historical_data(end_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER):
     """Fetches historical data for QQQ, TQQQ, and SQQQ up to a specified end_date."""
     start_date = TQQQ_INCEPTION_DATE
     tickers = [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]
-    
-    # Add a buffer day for yfinance end date
     market_end_date = end_date + timedelta(days=1) 
     
     try:
-        # Suppress yfinance output with silent=True, or just rely on progress=False
-        all_data = yf.download(
-            tickers, 
-            start=start_date, 
-            end=market_end_date, 
-            interval="1d", 
-            progress=False,
-            auto_adjust=False, 
-            timeout=15 
-        )
+        all_data = yf.download(tickers, start=start_date, end=market_end_date, interval="1d", progress=False, auto_adjust=False, timeout=15)
         
         if all_data.empty: return pd.DataFrame()
 
@@ -63,19 +56,17 @@ def fetch_historical_data(end_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER):
         
         for ticker in tickers:
             close_col = ('Adj Close', ticker) if ('Adj Close', ticker) in all_data.columns else ('Close', ticker)
-            
             if close_col in all_data.columns:
                 df_combined[f'{ticker}_close'] = all_data[close_col]
             
             if ticker == TICKER:
-                for metric in ['High', 'Low', 'Volume', 'Open']: 
+                for metric in ['High', 'Low']: 
                     if (metric, ticker) in all_data.columns:
                         df_combined[metric.lower()] = all_data[metric][ticker] 
 
         df_combined['close'] = df_combined[f'{TICKER}_close']
             
-        required_cols = ['close', 'high', 'low', 
-                         f'{LEVERAGED_TICKER}_close', f'{INVERSE_TICKER}_close']
+        required_cols = ['close', 'high', 'low', f'{LEVERAGED_TICKER}_close', f'{INVERSE_TICKER}_close']
                          
         df_combined.dropna(subset=required_cols, inplace=True)
         df_combined = df_combined[df_combined.index.date <= end_date] 
@@ -146,7 +137,6 @@ def generate_signal(indicators, LEVERAGED_TICKER, MINI_VASL_MULTIPLIER):
     ema_5 = indicators['ema_5']
     atr = indicators['atr']
 
-    # Volatility Stops (calculated using EOD indicators)
     vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)           
     mini_vasl_exit_level = ema_5 - (MINI_VASL_MULTIPLIER * atr)                    
     
@@ -157,7 +147,6 @@ def generate_signal(indicators, LEVERAGED_TICKER, MINI_VASL_MULTIPLIER):
     dma_bull_price = (price >= sma_200)
     
     if dma_bull_price:
-        # --- DMA BULL REGIME (TQQQ Focus) ---
         
         if price < vasl_trigger_level:
             trade_ticker = 'CASH'
@@ -169,7 +158,7 @@ def generate_signal(indicators, LEVERAGED_TICKER, MINI_VASL_MULTIPLIER):
              conviction_status = f"DMA Bull - Mini-VASL Exit ({MINI_VASL_MULTIPLIER:.1f}x ATR Exit)"
              final_signal = f"SELL {LEVERAGED_TICKER} / CASH (DMA Bull - Soft Stop)"
         
-        # NOTE: Momentum Filter (EMA5 <= SMA20) has been removed to reduce whipsaw.
+        # Momentum Filter (EMA5 <= SMA20) is intentionally removed
         
         else:
             trade_ticker = LEVERAGED_TICKER
@@ -198,7 +187,6 @@ def calculate_max_drawdown(series):
 
 def analyze_trade_pairs(trade_history_df, full_data, TICKER):
     """Processes the trade history to create Buy-Sell pairs with profit/loss."""
-    # Simplified for Streamlit: Focus on clean DataFrame preparation
     temp_df = trade_history_df.copy()
     temp_df['Portfolio Value Float'] = temp_df['Portfolio Value'].astype(float)
     
@@ -283,9 +271,8 @@ def plot_trade_signals(data_daily, trade_pairs, TICKER):
 
     return (price_line + indicator_lines + segment_lines).interactive()
 
-# --- Backtesting Engine ---
-
 class BacktestEngine:
+    # ... (Simplified methods for brevity, logic remains identical to previous step) ...
     def __init__(self, historical_data, LEVERAGED_TICKER, MINI_VASL_MULTIPLIER):
         self.df = historical_data.copy()
         self.LEVERAGED_TICKER = LEVERAGED_TICKER
@@ -388,14 +375,123 @@ class BacktestEngine:
         final_value = float(portfolio_value)
 
         return final_value, sim_df['BH_QQQ_Value'].iloc[-1], sim_df['BH_TQQQ_Value'].iloc[-1], pd.DataFrame(trade_history), final_holding, sim_df
-
 # --- Streamlit Application ---
+
+def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER, current_mini_vasl_multiplier):
+    """Encapsulates the entire backtest and rendering process."""
+    with st.spinner("Fetching data and running backtest..."):
+        
+        # 1. Fetch Data
+        full_data = fetch_historical_data(target_signal_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER)
+        
+        if full_data.empty:
+            st.error("Could not fetch necessary historical data. Check tickers or try a different date range.")
+            return
+
+        # 2. Get Live Price and Indicators
+        live_price = fetch_live_price(TICKER)
+        signal_price = live_price if live_price is not None else full_data['close'].iloc[-1].item()
+        price_source = "LIVE PRICE" if live_price is not None else "HISTORICAL CLOSE"
+
+        try:
+            indicators = calculate_indicators(full_data, target_signal_date, signal_price)
+            signal_results = generate_signal(indicators, LEVERAGED_TICKER, current_mini_vasl_multiplier)
+        except ValueError as e:
+            st.error(f"Error in signal generation: {e}")
+            return
+
+        # 3. Run Backtest
+        backtester = BacktestEngine(full_data, LEVERAGED_TICKER, current_mini_vasl_multiplier)
+        signals_df = backtester.generate_historical_signals()
+
+        start_of_tradable_data = signals_df.index.min().date() 
+        backtest_start = max(backtest_start_date, start_of_tradable_data) 
+        
+        final_value, bh_qqq, bh_tqqq, trade_history_df, final_holding, sim_df = backtester.run_simulation(backtest_start, TICKER, LEVERAGED_TICKER, INVERSE_TICKER)
+
+        # 4. Performance Metrics Calculation
+        last_trade_day = signals_df.index.max().date() 
+        days_held = (last_trade_day - backtest_start).days
+        years_held = days_held / 365.25 if days_held > 0 else 1 
+        initial_float = float(INITIAL_INVESTMENT)
+
+        strategy_mdd = calculate_max_drawdown(sim_df['Portfolio_Value'])
+        bh_qqq_mdd = calculate_max_drawdown(sim_df['BH_QQQ_Value'])
+        bh_tqqq_mdd = calculate_max_drawdown(sim_df['BH_TQQQ_Value'])
+        
+        calc_cagr = lambda final, initial, years: ((final / initial) ** (1 / years) - 1) * 100 if final > 0 and initial > 0 and years > 0 else 0.0
+        strategy_cagr = calc_cagr(final_value, initial_float, years_held)
+        bh_qqq_cagr = calc_cagr(bh_qqq, initial_float, years_held)
+        bh_tqqq_cagr = calc_cagr(bh_tqqq, initial_float, years_held)
+
+    st.markdown("## 📊 Strategy Results & Signal")
+    st.markdown(f"**Backtest Period:** `{backtest_start.strftime('%Y-%m-%d')}` to `{last_trade_day.strftime('%Y-%m-%d')}`")
+    st.markdown("---")
+
+    # --- Live Signal Section ---
+    st.subheader("Live Trading Signal")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Signal Price Used", f"${indicators['current_price']:.2f}", help=f"Source: {price_source}")
+    col2.metric("Trade Ticker", signal_results['trade_ticker'])
+    col3.metric("Conviction", signal_results['conviction'])
+    
+    st.info(f"**Final Signal:** {signal_results['signal']}")
+
+    # --- HIDING SECTIONS ---
+    # The data is still calculated, but the display elements are removed
+    
+    # --- Performance Summary ---
+    st.markdown("## 💰 Backtest Performance Summary")
+    
+    summary_data = {
+        'Metric': [f"Strategy ({LEVERAGED_TICKER})", f"{TICKER} Buy & Hold", f"{LEVERAGED_TICKER} Buy & Hold"], 
+        'Final Value': [final_value, bh_qqq, bh_tqqq],
+        'Total Return': [(final_value/initial_float - 1) * 100, (bh_qqq/initial_float - 1) * 100, (bh_tqqq/initial_float - 1) * 100], 
+        'CAGR': [strategy_cagr, bh_qqq_cagr, bh_tqqq_cagr],
+        'Max Drawdown': [strategy_mdd, bh_qqq_mdd, bh_tqqq_mdd] 
+    }
+    df_summary = pd.DataFrame(summary_data)
+    
+    st.dataframe(df_summary.style.format({
+        'Final Value': '${:,.2f}', 
+        'Total Return': '{:+.2f}%', 
+        'CAGR': '{:+.2f}%', 
+        'Max Drawdown': '{:,.2f}%'
+    }), hide_index=True, use_container_width=True)
+
+    # --- Interactive Plot ---
+    st.markdown("## 📈 Interactive Price and Trade Signal Chart")
+    
+    if len(trade_history_df[trade_history_df['Action'].str.startswith('BUY')]) > 0:
+        trade_pairs = analyze_trade_pairs(trade_history_df, full_data, TICKER)
+        plot_data_full = signals_df[signals_df.index.date >= backtest_start].copy()
+        
+        st.altair_chart(plot_trade_signals(plot_data_full, trade_pairs, TICKER), use_container_width=True)
+        st.caption(f"Chart shows {TICKER} price with trade segments. Green = profitable trade, Red = losing trade.")
+    else:
+        st.warning("No trades were executed in the selected backtest period.")
+
+    # --- Detailed Trade History ---
+    st.markdown("## 📜 Detailed Trade History")
+    
+    trade_history_display = trade_history_df.copy()
+    trade_history_display['Date'] = trade_history_display['Date'].astype(str)
+    
+    st.dataframe(trade_history_display.style.format({
+        'Price': '${:,.2f}', 
+        'Portfolio Value': '${:,.2f}'
+    }), hide_index=True, use_container_width=True)
+    st.caption("Trades are executed at the Close price of the Date shown.")
 
 def main_app():
     
     st.set_page_config(layout="wide", page_title="TQQQ Volatility Strategy Backtester")
     st.title("📈 Leveraged ETF Volatility Strategy Backtester")
     st.markdown("---")
+
+    # Get default dates
+    last_closed_day = get_last_closed_trading_day()
+    default_ytd_start = get_default_ytd_start_date(last_closed_day)
 
     # --- Sidebar Inputs ---
     with st.sidebar:
@@ -407,148 +503,31 @@ def main_app():
         LEVERAGED_TICKER = st.text_input("Leveraged ETF (3X)", "TQQQ")
         INVERSE_TICKER = st.text_input("Inverse ETF (3X)", "SQQQ")
         
-        # Dates
+        # Dates (Default is YTD)
         st.subheader("Backtest Period")
-        backtest_start_date = st.date_input("Start Date (TQQQ Inception: 2010-02-09)", date(2024, 1, 1), min_value=TQQQ_INCEPTION_DATE)
-        target_signal_date = st.date_input("End Date / Signal Date", get_last_closed_trading_day())
+        backtest_start_date = st.date_input("Start Date", default_ytd_start, min_value=TQQQ_INCEPTION_DATE)
+        target_signal_date = st.date_input("End Date / Signal Date", last_closed_day)
         
         # Strategy Customization
         st.subheader("Risk Control")
-        # Ensure the MINI_VASL_MULTIPLIER can be adjusted by the user
-        mini_vasl_multiplier_input = st.number_input(
+        current_mini_vasl_multiplier = st.number_input(
             f"Soft Stop Multiplier ({TICKER} Mini-VASL ATR)", 
             min_value=0.5, 
             max_value=3.0, 
             value=MINI_VASL_MULTIPLIER, 
             step=0.1
         )
+        st.caption(f"Hard Stop Multiplier: {ATR_MULTIPLIER}x ATR (Fixed)")
         
-        # Hard stop is fixed at 2.0x ATR
-        st.write(f"Hard Stop Multiplier: {ATR_MULTIPLIER}x ATR (Fixed)")
-        
-        run_button = st.button("Run Backtest & Get Signal", type="primary")
-
-    # --- Main Content ---
-    
-    if run_button:
-        with st.spinner("Fetching data and running backtest..."):
-            
-            # Use the user-defined multiplier
-            current_mini_vasl_multiplier = mini_vasl_multiplier_input
-            
-            # 1. Fetch Data
-            full_data = fetch_historical_data(target_signal_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER)
-            
-            if full_data.empty:
-                st.error("Could not fetch necessary historical data. Check tickers or try a different date range.")
-                return
-
-            # 2. Get Live Price and Indicators
-            live_price = fetch_live_price(TICKER)
-            signal_price = live_price if live_price is not None else full_data['close'].iloc[-1].item()
-            price_source = "LIVE PRICE" if live_price is not None else "HISTORICAL CLOSE"
-
-            try:
-                indicators = calculate_indicators(full_data, target_signal_date, signal_price)
-                signal_results = generate_signal(indicators, LEVERAGED_TICKER, current_mini_vasl_multiplier)
-            except ValueError as e:
-                st.error(f"Error in signal generation: {e}")
-                return
-
-            # 3. Run Backtest
-            backtester = BacktestEngine(full_data, LEVERAGED_TICKER, current_mini_vasl_multiplier)
-            signals_df = backtester.generate_historical_signals()
-
-            start_of_tradable_data = signals_df.index.min().date() 
-            backtest_start = max(backtest_start_date, start_of_tradable_data) 
-            
-            final_value, bh_qqq, bh_tqqq, trade_history_df, final_holding, sim_df = backtester.run_simulation(backtest_start, TICKER, LEVERAGED_TICKER, INVERSE_TICKER)
-
-            # 4. Performance Metrics Calculation
-            last_trade_day = signals_df.index.max().date() 
-            days_held = (last_trade_day - backtest_start).days
-            years_held = days_held / 365.25 if days_held > 0 else 1 
-            initial_float = float(INITIAL_INVESTMENT)
-
-            strategy_mdd = calculate_max_drawdown(sim_df['Portfolio_Value'])
-            bh_qqq_mdd = calculate_max_drawdown(sim_df['BH_QQQ_Value'])
-            bh_tqqq_mdd = calculate_max_drawdown(sim_df['BH_TQQQ_Value'])
-            
-            calc_cagr = lambda final, initial, years: ((final / initial) ** (1 / years) - 1) * 100 if final > 0 and initial > 0 and years > 0 else 0.0
-            strategy_cagr = calc_cagr(final_value, initial_float, years_held)
-            bh_qqq_cagr = calc_cagr(bh_qqq, initial_float, years_held)
-            bh_tqqq_cagr = calc_cagr(bh_tqqq, initial_float, years_held)
-
-        st.markdown("## 📊 Strategy Results & Signal")
-        st.markdown(f"**Backtest Period:** `{backtest_start.strftime('%Y-%m-%d')}` to `{last_trade_day.strftime('%Y-%m-%d')}`")
+        # NOTE: Removed the run button for auto-execution, but keep a re-run button for user convenience
         st.markdown("---")
-
-        # --- Live Signal Section ---
-        st.subheader("Live Trading Signal")
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Signal Price Used", f"${indicators['current_price']:.2f}", help=f"Source: {price_source}")
-        col2.metric("Trade Ticker", signal_results['trade_ticker'])
-        col3.metric("Conviction", signal_results['conviction'])
-        
-        st.info(f"**Final Signal:** {signal_results['signal']}")
-
-        st.markdown("### Indicator & Volatility Levels")
-        
-        indicator_data = {
-            "Indicator": [f"5-Day EMA", f"20-Day SMA", f"200-Day SMA", f"14-Day ATR"],
-            f"{TICKER} Price ($)": [indicators['ema_5'], indicators['sma_20'], indicators['sma_200'], indicators['atr']],
-        }
-        st.dataframe(pd.DataFrame(indicator_data).set_index("Indicator").style.format({"QQQ Price ($)": "${:,.2f}"}), use_container_width=True)
-
-        volatility_data = {
-            "Stop Level": [f"Mini-VASL Exit ({current_mini_vasl_multiplier:.1f}x ATR)", f"VASL Trigger (2.0x ATR)"],
-            "Price Target ($)": [signal_results['mini_vasl_down'], signal_results['vasl_down']],
-        }
-        st.dataframe(pd.DataFrame(volatility_data).set_index("Stop Level").style.format({"Price Target ($)": "${:,.2f}"}), use_container_width=True)
-
-
-        # --- Performance Summary ---
-        st.markdown("## 💰 Backtest Performance Summary")
-        
-        summary_data = {
-            'Metric': [f"Strategy ({LEVERAGED_TICKER})", f"{TICKER} Buy & Hold", f"{LEVERAGED_TICKER} Buy & Hold"], 
-            'Final Value': [final_value, bh_qqq, bh_tqqq],
-            'Total Return': [(final_value/initial_float - 1) * 100, (bh_qqq/initial_float - 1) * 100, (bh_tqqq/initial_float - 1) * 100], 
-            'CAGR': [strategy_cagr, bh_qqq_cagr, bh_tqqq_cagr],
-            'Max Drawdown': [strategy_mdd, bh_qqq_mdd, bh_tqqq_mdd] 
-        }
-        df_summary = pd.DataFrame(summary_data)
-        
-        st.dataframe(df_summary.style.format({
-            'Final Value': '${:,.2f}', 
-            'Total Return': '{:+.2f}%', 
-            'CAGR': '{:+.2f}%', 
-            'Max Drawdown': '{:,.2f}%'
-        }), hide_index=True, use_container_width=True)
-
-        # --- Interactive Plot ---
-        st.markdown("## 📈 Interactive Price and Trade Signal Chart")
-        
-        if len(trade_history_df[trade_history_df['Action'].str.startswith('BUY')]) > 0:
-            trade_pairs = analyze_trade_pairs(trade_history_df, full_data, TICKER)
-            plot_data_full = signals_df[signals_df.index.date >= backtest_start].copy()
+        if st.button("Re-Run Analysis", type="primary"):
+            st.session_state['rerun'] = True # Use session state to force a re-run logic if needed, though Streamlit usually handles this.
             
-            st.altair_chart(plot_trade_signals(plot_data_full, trade_pairs, TICKER), use_container_width=True)
-            st.caption("Green segments/points indicate profitable trades; Red indicates losing trades. Price shown is the underlying ETF (QQQ).")
-        else:
-            st.warning("No trades were executed in the selected backtest period.")
+    # --- Auto-Run Logic ---
+    # Streamlit re-runs the entire script whenever a widget changes, so we just call the function.
+    run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER, current_mini_vasl_multiplier)
 
-        # --- Detailed Trade History ---
-        st.markdown("## 📜 Detailed Trade History")
-        
-        trade_history_display = trade_history_df.copy()
-        trade_history_display['Date'] = trade_history_display['Date'].astype(str)
-        
-        st.dataframe(trade_history_display.style.format({
-            'Price': '${:,.2f}', 
-            'Portfolio Value': '${:,.2f}'
-        }), hide_index=True, use_container_width=True)
-        st.caption("Trades are executed at the Close price of the Date shown.")
 
 if __name__ == "__main__":
     main_app()
