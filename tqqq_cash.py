@@ -39,7 +39,10 @@ def get_default_ytd_start_date(today_date):
 
 @st.cache_data(ttl=24*3600) # Cache data for 24 hours
 def fetch_historical_data(end_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER):
-    """Fetches historical data for QQQ, TQQQ, and SQQQ up to a specified end_date."""
+    """
+    Fetches historical data for QQQ, TQQQ, and SQQQ up to a specified end_date.
+    Cached: Only re-runs if end_date or ticker config changes.
+    """
     start_date = TQQQ_INCEPTION_DATE
     tickers = [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]
     market_end_date = end_date + timedelta(days=1) 
@@ -93,8 +96,12 @@ def calculate_true_range_and_atr(df, atr_period):
     
     return atr_series 
 
+@st.cache_data(ttl=6*3600) # Cache for 6 hours
 def calculate_indicators(data_daily, target_date, current_price):
-    """Calculates all indicators using data only up to target_date (Close Price)."""
+    """
+    Calculates signal-day indicators using data only up to target_date (Close Price).
+    Cached: Re-runs only if data/target date changes.
+    """
     df = data_daily[data_daily.index.date <= target_date].copy() 
     
     if df.empty:
@@ -110,7 +117,7 @@ def calculate_indicators(data_daily, target_date, current_price):
         raise ValueError(f"Insufficient data (need {SMA_PERIOD} days) to calculate 200-Day SMA.")
         
     current_sma_200 = df[sma_200_col].iloc[-1]
-    latest_sma_20 = df[f'SMA_{SMA_SHORT_PERIOD}'].iloc[-1] 
+    # latest_sma_20 = df[f'SMA_{SMA_SHORT_PERIOD}'].iloc[-1] 
     latest_ema_5 = df[f'EMA_{EMA_PERIOD}'].iloc[-1]
     df['ATR'] = calculate_true_range_and_atr(df, ATR_PERIOD)
     latest_atr = df['ATR'].ffill().iloc[-1]
@@ -121,10 +128,56 @@ def calculate_indicators(data_daily, target_date, current_price):
     return {
         'current_price': current_price,
         'sma_200': current_sma_200,
-        'sma_20': latest_sma_20,
+        # 'sma_20': latest_sma_20, # Not strictly needed for the signal logic
         'ema_5': latest_ema_5,
         'atr': latest_atr
     }
+    
+@st.cache_data(ttl=24*3600) # Cache for 24 hours
+def generate_all_historical_signals(data_daily, LEVERAGED_TICKER, MINI_VASL_MULTIPLIER):
+    """
+    Generates all historical signals (Technical Analysis) for the backtest data.
+    Cached: Prevents recalculating all indicators on every Streamlit rerun.
+    """
+    df = data_daily.copy()
+    
+    df.ta.sma(length=SMA_PERIOD, append=True)
+    df.ta.ema(length=EMA_PERIOD, append=True)
+    df['ATR'] = calculate_true_range_and_atr(df, ATR_PERIOD)
+    
+    indicator_cols = [f'SMA_{SMA_PERIOD}', f'EMA_{EMA_PERIOD}', 'ATR', 'close'] 
+    df_current_day_data = df[indicator_cols].copy().rename(columns={'close': 'current_close'})
+    df['Trade_Ticker'] = 'CASH' 
+    
+    for index in df.index: 
+        current_data = df_current_day_data.loc[index]
+        
+        if pd.isna(current_data[f'SMA_{SMA_PERIOD}']): continue
+            
+        price = current_data['current_close'] 
+        ema_5 = current_data[f'EMA_{EMA_PERIOD}']
+        sma_200 = current_data[f'SMA_{SMA_PERIOD}']
+        atr = current_data['ATR']
+
+        vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)
+        mini_vasl_exit_level = ema_5 - (MINI_VASL_MULTIPLIER * atr) 
+        
+        dma_bull_price = (price >= sma_200)
+        
+        if dma_bull_price:
+            if price < vasl_trigger_level:
+                trade_ticker = 'CASH'
+            elif price < mini_vasl_exit_level: 
+                 trade_ticker = 'CASH'
+            else:
+                trade_ticker = LEVERAGED_TICKER
+        else: 
+            trade_ticker = 'CASH' 
+        
+        df.loc[index, 'Trade_Ticker'] = trade_ticker
+
+    df.dropna(subset=[f'SMA_{SMA_PERIOD}', 'Trade_Ticker'], inplace=True)
+    return df
 
 def generate_signal(indicators, LEVERAGED_TICKER, MINI_VASL_MULTIPLIER):
     """Applies the trading strategy logic."""
@@ -231,6 +284,10 @@ def plot_trade_signals(data_daily, trade_pairs, TICKER):
     """Generates an Altair chart for Streamlit display."""
     plot_data = data_daily.copy()
     price_cols = ['close', f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'] 
+    
+    # Re-calculate SMA_SHORT_PERIOD for plotting purposes (since it wasn't needed for backtest signal)
+    plot_data.ta.sma(length=SMA_SHORT_PERIOD, append=True)
+    
     plot_data_long = plot_data.reset_index().rename(columns={'index': 'Date'})[['Date'] + price_cols].melt('Date', var_name='Metric', value_name='Price')
 
     trade_segments = []
@@ -263,50 +320,11 @@ def plot_trade_signals(data_daily, trade_pairs, TICKER):
     return (price_line + indicator_lines + segment_lines).interactive()
 
 class BacktestEngine:
-    def __init__(self, historical_data, LEVERAGED_TICKER, MINI_VASL_MULTIPLIER):
-        self.df = historical_data.copy()
+    """Modified to accept the pre-computed signals DataFrame."""
+    def __init__(self, signals_df, LEVERAGED_TICKER):
+        # Use the signals_df calculated by the cached function
+        self.df = signals_df.copy()
         self.LEVERAGED_TICKER = LEVERAGED_TICKER
-        self.MINI_VASL_MULTIPLIER = MINI_VASL_MULTIPLIER
-        
-    def generate_historical_signals(self):
-        self.df.ta.sma(length=SMA_PERIOD, append=True)
-        self.df.ta.sma(length=SMA_SHORT_PERIOD, append=True) 
-        self.df.ta.ema(length=EMA_PERIOD, append=True)
-        self.df['ATR'] = calculate_true_range_and_atr(self.df, ATR_PERIOD)
-        
-        indicator_cols = [f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}', 'ATR', 'close'] 
-        df_current_day_data = self.df[indicator_cols].copy().rename(columns={'close': 'current_close'})
-        self.df['Trade_Ticker'] = 'CASH' 
-        
-        for index in self.df.index: 
-            current_data = df_current_day_data.loc[index]
-            
-            if pd.isna(current_data[f'SMA_{SMA_PERIOD}']): continue
-                
-            price = current_data['current_close'] 
-            ema_5 = current_data[f'EMA_{EMA_PERIOD}']
-            sma_200 = current_data[f'SMA_{SMA_PERIOD}']
-            atr = current_data['ATR']
-
-            vasl_trigger_level = ema_5 - (ATR_MULTIPLIER * atr)
-            mini_vasl_exit_level = ema_5 - (self.MINI_VASL_MULTIPLIER * atr) 
-            
-            dma_bull_price = (price >= sma_200)
-            
-            if dma_bull_price:
-                if price < vasl_trigger_level:
-                    trade_ticker = 'CASH'
-                elif price < mini_vasl_exit_level: 
-                     trade_ticker = 'CASH'
-                else:
-                    trade_ticker = self.LEVERAGED_TICKER
-            else: 
-                trade_ticker = 'CASH' 
-            
-            self.df.loc[index, 'Trade_Ticker'] = trade_ticker
-
-        self.df.dropna(subset=[f'SMA_{SMA_PERIOD}', 'Trade_Ticker'], inplace=True)
-        return self.df
         
     def run_simulation(self, start_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER):
         sim_df = self.df[self.df.index.date >= start_date].copy()
@@ -329,7 +347,8 @@ class BacktestEngine:
         
         for i in range(len(sim_df)):
             current_day = sim_df.iloc[i]
-            trade_ticker = current_day['Trade_Ticker']
+            # Use Trade_Ticker directly from the pre-calculated signal
+            trade_ticker = current_day['Trade_Ticker'] 
             current_day_prices = {t: Decimal(str(current_day[f'{t}_close'])) for t in [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]}
             
             if trade_ticker != current_ticker:
@@ -370,49 +389,47 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
     """Encapsulates the entire backtest and rendering process."""
     with st.spinner("Fetching data and running backtest..."):
         
-        # 1. Fetch Data
+        # 1. Fetch Data (Cached)
         full_data = fetch_historical_data(target_signal_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER)
         
         if full_data.empty:
             st.error("Could not fetch necessary historical data. Check tickers or try a different date range.")
             return
 
-        # 2. Get Live Price and Indicators
+        # 2. Get Live Price and Signal Indicators (Cached)
         live_price = fetch_live_price(TICKER)
         signal_price = live_price if live_price is not None else full_data['close'].iloc[-1].item()
         price_source = "LIVE PRICE" if live_price is not None else "HISTORICAL CLOSE"
 
         try:
+            # Use cached function for signal indicators
             indicators = calculate_indicators(full_data, target_signal_date, signal_price)
             signal_results = generate_signal(indicators, LEVERAGED_TICKER, current_mini_vasl_multiplier)
         except ValueError as e:
             st.error(f"Error in signal generation: {e}")
             return
 
-        # 3. Run Backtest
-        backtester = BacktestEngine(full_data, LEVERAGED_TICKER, current_mini_vasl_multiplier)
-        signals_df = backtester.generate_historical_signals()
+        # 3. Generate Historical Signals (Cached)
+        signals_df = generate_all_historical_signals(full_data, LEVERAGED_TICKER, current_mini_vasl_multiplier)
+        
+        # 4. Run Backtest Simulation
+        backtester = BacktestEngine(signals_df, LEVERAGED_TICKER)
 
         start_of_tradable_data = signals_df.index.min().date() 
         backtest_start = max(backtest_start_date, start_of_tradable_data) 
         
         final_value, bh_qqq, bh_tqqq, trade_history_df, final_holding, sim_df = backtester.run_simulation(backtest_start, TICKER, LEVERAGED_TICKER, INVERSE_TICKER)
 
-        # 4. Performance Metrics Calculation
+        # 5. Performance Metrics Calculation
         last_trade_day = signals_df.index.max().date() 
         days_held = (last_trade_day - backtest_start).days
         years_held = days_held / 365.25 if days_held > 0 else 1 
         initial_float = float(INITIAL_INVESTMENT)
 
         strategy_mdd = calculate_max_drawdown(sim_df['Portfolio_Value'])
-        # NOTE: Keeping Buy & Hold calculations for the graph, just removing them from the summary table display
-        bh_qqq_mdd = calculate_max_drawdown(sim_df['BH_QQQ_Value'])
-        bh_tqqq_mdd = calculate_max_drawdown(sim_df['BH_TQQQ_Value'])
         
         calc_cagr = lambda final, initial, years: ((final / initial) ** (1 / years) - 1) * 100 if final > 0 and initial > 0 and years > 0 else 0.0
         strategy_cagr = calc_cagr(final_value, initial_float, years_held)
-        bh_qqq_cagr = calc_cagr(bh_qqq, initial_float, years_held)
-        bh_tqqq_cagr = calc_cagr(bh_tqqq, initial_float, years_held)
 
     st.markdown("## 📊 Strategy Results & Signal")
     st.markdown(f"**Backtest Period:** `{backtest_start.strftime('%Y-%m-%d')}` to `{last_trade_day.strftime('%Y-%m-%d')}`")
@@ -435,11 +452,11 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
 
     st.markdown("---")
 
-    # --- Performance Summary (MODIFIED: Only show Strategy) ---
+    # --- Performance Summary (Only show Strategy) ---
     st.markdown("## 💰 Backtest Performance Summary")
     
     summary_data = {
-        'Metric': [f"Strategy ({LEVERAGED_TICKER})"], # Only the Strategy row is kept
+        'Metric': [f"Strategy ({LEVERAGED_TICKER})"], 
         'Final Value': [final_value],
         'Total Return': [(final_value/initial_float - 1) * 100], 
         'CAGR': [strategy_cagr],
@@ -499,23 +516,28 @@ def main_app():
         
         # Dates (Default is YTD)
         st.subheader("Backtest Period")
-        backtest_start_date = st.date_input("Start Date", default_ytd_start, min_value=TQQQ_INCEPTION_DATE)
-        target_signal_date = st.date_input("End Date / Signal Date", last_closed_day)
+        # Ensure the date inputs are used as cache keys
+        backtest_start_date = st.date_input("Start Date", default_ytd_start, min_value=TQQQ_INCEPTION_DATE, key='start_date')
+        target_signal_date = st.date_input("End Date / Signal Date", last_closed_day, key='end_date')
         
         # Strategy Customization
         st.subheader("Risk Control")
+        # Ensure multiplier is used as a cache key
         current_mini_vasl_multiplier = st.number_input(
             f"Soft Stop Multiplier ({TICKER} Mini-VASL ATR)", 
             min_value=0.5, 
             max_value=3.0, 
             value=MINI_VASL_MULTIPLIER, 
-            step=0.1
+            step=0.1,
+            key='mini_vasl_mult'
         )
         st.caption(f"Hard Stop Multiplier: {ATR_MULTIPLIER}x ATR (Fixed)")
         
         st.markdown("---")
         if st.button("Re-Run Analysis", type="primary"):
-            pass 
+            # A dummy action to force a rerun if needed
+            st.session_state['rerun_trigger'] = st.session_state.get('rerun_trigger', 0) + 1
+            st.rerun()
             
     # --- Auto-Run Logic ---
     run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER, current_mini_vasl_multiplier)
