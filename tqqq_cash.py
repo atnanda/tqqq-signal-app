@@ -426,23 +426,23 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
     st.markdown("## 📊 Strategy Results & Signal")
     st.markdown(f"**Backtest Period:** `{backtest_start.strftime('%Y-%m-%d')}` to `{last_trade_day.strftime('%Y-%m-%d')}`")
     st.markdown("---")
+    
+    # --- Action Section (MOVED AND BOLDED) ---
+    st.markdown("### **Trade Action**")
+    st.markdown(f"## :rotating_light: **{signal_results['signal']}**")
+    st.caption(f"**Conviction:** {signal_results['conviction']}")
+    st.markdown("---")
 
-    # --- Live Signal Section (ADJUSTED FOR FIT) ---
-    st.subheader("Live Trading Signal")
+    # --- Live Signal Section ---
+    st.subheader("Live Trading Signal Details")
     
     # Use two columns for the most concise metrics (Price and Ticker)
     col1, col2 = st.columns(2)
     col1.metric("Price Used", f"${indicators['current_price']:.2f}", help=f"Source: {price_source}")
     col2.metric("Recommended Ticker", signal_results['trade_ticker'])
 
-    # Use a single, full-width element for the signal and conviction
-    st.markdown("---")
-    st.markdown(f"### **Action:** `{signal_results['signal']}`")
-    st.caption(f"**Conviction:** {signal_results['conviction']}")
     st.markdown("---")
 
-    # --- HIDING INDICATOR AND VOLATILITY SECTIONS ---
-    
     # --- Performance Summary ---
     st.markdown("## 💰 Backtest Performance Summary")
     
@@ -524,7 +524,7 @@ def main_app():
         
         st.markdown("---")
         if st.button("Re-Run Analysis", type="primary"):
-            # Streamlit re-runs the entire script on widget changes, but a button forces a refresh 
+            # Streamlit re-runs the entire script on widget changes. This button acts as a manual refresh.
             pass 
             
     # --- Auto-Run Logic ---
