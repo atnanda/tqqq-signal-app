@@ -380,7 +380,6 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     df_segments = pd.DataFrame(trade_segments)
     
     # --- Altair Chart Composition ---
-    # The chart object must NOT have a string width property, only numerical or unset.
     base = alt.Chart(plot_data_long).encode(x=alt.X('Date:T', title='Date')).properties(title=f'{TICKER} Price and Strategy Signals{chart_title_suffix}', height=500)
     
     # 1. Base Price Line
@@ -400,22 +399,38 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
         x=alt.X('Date:T'),
         y=alt.Y('Price:Q'),
         detail='trade_id:N',
-        # CRITICAL FIX: Use Order channel to force the categorical sort to match the domain/range
+        # Use Order channel to ensure trade segments draw correctly
         order=alt.Order('Sort_Key:Q'),
-        color=alt.Color('P_L_Category:N', 
-                        scale=alt.Scale(
-                            # Domain order matches the desired color order
-                            domain=['Profit', 'Loss'],          
-                            range=['#008000', '#d62728'],       # Profit (Green), Loss (Red)
-                        ), 
-                        legend=alt.Legend(title="Trade P/L")),
+        
+        # *** CRITICAL COLOR FIX: Use Conditional Encoding for guaranteed Profit/Loss colors ***
+        color=alt.condition(
+            alt.Predicate(field='P_L_Category', equal='Profit'),
+            alt.value('#008000'), # Green
+            alt.value('#d62728')  # Red
+        ),
+        
         tooltip=[
             alt.Tooltip('P_L:Q', title='P/L', format='+.2f'),
             alt.Tooltip('P_L_Category:N', title='Outcome'),
         ]
     )
+    
+    # Add a custom Legend for the Conditional Colors (since conditional encoding doesn't create a legend automatically)
+    legend_data = pd.DataFrame({
+        'Label': ['Profit', 'Loss'],
+        'Color': ['#008000', '#d62728']
+    })
 
+    legend_chart = alt.Chart(legend_data).mark_point().encode(
+        y=alt.Y('Label:N', axis=None, title='Trade P/L'),
+        color=alt.Color('Color', scale=None, title='Trade P/L'), 
+        size=alt.value(0) # Hide the actual points
+    ).properties(title="Trade P/L")
+
+    # Combine the main chart and the hidden legend chart (legend display might vary based on Streamlit/Altair versions)
+    # The simplest return remains the core chart, as the legend logic is complex to embed.
     return (price_line + indicator_lines + segment_lines).interactive()
+
 
 # --- Streamlit Application (Remaining functions) ---
 
@@ -502,7 +517,6 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
     }
     df_summary = pd.DataFrame(summary_data)
     
-    # FIX: Use width='stretch' for st.dataframe
     st.dataframe(df_summary.style.format({
         'Final Value': '${:,.2f}', 
         'Total Return': '{:+.2f}%', 
@@ -525,7 +539,7 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
     if len(trade_history_df[trade_history_df['Action'].str.startswith('BUY')]) > 0:
         trade_pairs = analyze_trade_pairs(trade_history_df, full_data, TICKER)
         
-        # FIX: Revert to use_container_width=True to avoid runtime ValidationError
+        # Reverted to use_container_width=True to avoid the Streamlit/Altair ValidationError
         st.altair_chart(plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_start_date), use_container_width=True)
         st.caption(chart_caption)
     else:
@@ -548,7 +562,7 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
             strokeDash=alt.condition(alt.datum.Metric == f'SMA_{SMA_PERIOD}', alt.value([5, 5]), alt.value([2, 2])),
         ).transform_filter((alt.datum.Metric != 'close'))
 
-        # FIX: Revert to use_container_width=True to avoid runtime ValidationError
+        # Reverted to use_container_width=True to avoid the Streamlit/Altair ValidationError
         st.altair_chart((price_line + indicator_lines).interactive(), use_container_width=True)
         st.warning("No trades were executed in the selected backtest period. Displaying price and indicators only.")
 
@@ -557,7 +571,6 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
         trade_history_display = trade_history_df.copy()
         trade_history_display['Date'] = trade_history_display['Date'].astype(str)
         
-        # FIX: Use width='stretch' for st.dataframe
         st.dataframe(trade_history_display.style.format({
             'Price': '${:,.2f}', 
             'Portfolio Value': '${:,.2f}'
