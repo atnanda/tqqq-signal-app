@@ -328,9 +328,9 @@ def analyze_trade_pairs(trade_history_df, full_data, TICKER):
                 sell_portfolio_value = Decimal(str(row['Portfolio Value Float']))
                 profit_loss = float(sell_portfolio_value - buy_trade['buy_portfolio_value'])
                 
-                # --- COLOR FIX: Map boolean to a numeric Ordinal value ---
+                # --- COLOR FIX: Use categorical string ---
                 is_profitable = profit_loss >= 0
-                p_l_numeric = 1 if is_profitable else 0 # 1 for Profit (Green), 0 for Loss (Red)
+                p_l_category = "Profit" if is_profitable else "Loss"
                 
                 trade_pairs.append({
                     'buy_date': buy_trade['buy_date'],
@@ -338,8 +338,7 @@ def analyze_trade_pairs(trade_history_df, full_data, TICKER):
                     'buy_qqq_price': buy_trade['buy_qqq_price'],
                     'sell_qqq_price': row['QQQ_Price'],
                     'profit_loss': profit_loss,
-                    'is_profitable_str': "Profit" if is_profitable else "Loss", # For tooltip/legend
-                    'p_l_numeric': p_l_numeric, # For reliable coloring
+                    'is_profitable_str': p_l_category, # Use string column for coloring/legend
                     'asset': buy_trade['asset']
                 })
                 buy_trade = None
@@ -348,7 +347,7 @@ def analyze_trade_pairs(trade_history_df, full_data, TICKER):
 
 def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_start_date):
     """
-    Generates an Altair chart using an explicit numeric Ordinal scale 
+    Generates an Altair chart using explicit domain, range, and sort 
     to guarantee Green/Red colors for trade segments.
     """
     
@@ -371,11 +370,9 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     trade_segments = []
     for i, trade in enumerate(trade_pairs):
         if trade['buy_date'].date() >= chart_start_date:
-            p_l_numeric = trade['p_l_numeric'] 
             p_l_category = trade['is_profitable_str']
-            # Using P_L_Numeric for reliable coloring, P_L_Category for legend/tooltip
-            trade_segments.append({'trade_id': i, 'Date': trade['buy_date'], 'Price': trade['buy_qqq_price'], 'P_L_Numeric': p_l_numeric, 'P_L_Category': p_l_category, 'Signal': 'Buy', 'P_L': trade['profit_loss']})
-            trade_segments.append({'trade_id': i, 'Date': trade['sell_date'], 'Price': trade['sell_qqq_price'], 'P_L_Numeric': p_l_numeric, 'P_L_Category': p_l_category, 'Signal': 'Sell', 'P_L': trade['profit_loss']})
+            trade_segments.append({'trade_id': i, 'Date': trade['buy_date'], 'Price': trade['buy_qqq_price'], 'P_L_Category': p_l_category, 'Signal': 'Buy', 'P_L': trade['profit_loss']})
+            trade_segments.append({'trade_id': i, 'Date': trade['sell_date'], 'Price': trade['sell_qqq_price'], 'P_L_Category': p_l_category, 'Signal': 'Sell', 'P_L': trade['profit_loss']})
         
     df_segments = pd.DataFrame(trade_segments)
     
@@ -395,16 +392,19 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     ).transform_filter((alt.datum.Metric != 'close'))
 
     # 3. Trade Segments 
-    # FINAL FIX: Use P_L_Numeric:O (Ordinal) for color mapping and P_L_Category:N for legend title/labels
+    # FINAL FIX: Use P_L_Category:N with explicit domain, range, AND sort
     segment_lines = alt.Chart(df_segments).mark_line(size=3).encode(
         x=alt.X('Date:T'),
         y=alt.Y('Price:Q'),
         detail='trade_id:N',
-        # Map the numeric ordinal column (1=Profit, 0=Loss) to colors
-        color=alt.Color('P_L_Numeric:O', 
-                        scale=alt.Scale(domain=[1, 0], range=['#008000', '#d62728']), 
-                        # Override legend to use string labels for clarity
-                        legend=alt.Legend(title="Trade P/L", values=[1, 0], labelExpr="datum.value == 1 ? 'Profit (Green)' : 'Loss (Red)'")),
+        # Map the categorical string column to colors
+        color=alt.Color('P_L_Category:N', 
+                        scale=alt.Scale(
+                            domain=['Profit', 'Loss'],          # The string labels
+                            range=['#008000', '#d62728'],       # The corresponding hex codes
+                            sort=['Profit', 'Loss']             # CRITICAL: Forces Altair to respect this order
+                        ), 
+                        legend=alt.Legend(title="Trade P/L")),
         tooltip=[
             alt.Tooltip('P_L:Q', title='P/L', format='+.2f'),
             alt.Tooltip('P_L_Category:N', title='Outcome'),
@@ -413,7 +413,7 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
 
     return (price_line + indicator_lines + segment_lines).interactive()
 
-# --- Streamlit Application (The run_analysis and main_app functions remain the same) ---
+# --- Streamlit Application (Remaining functions) ---
 
 def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER, current_mini_vasl_multiplier):
     """Encapsulates the entire backtest and rendering process."""
