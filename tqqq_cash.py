@@ -294,7 +294,10 @@ def calculate_max_drawdown(series):
     return drawdown.min() * 100
 
 def analyze_trade_pairs(trade_history_df, full_data, TICKER):
-    """Processes the trade history to create Buy-Sell pairs with profit/loss."""
+    """
+    Processes the trade history to create Buy-Sell pairs with profit/loss
+    AND identifies the last open Buy trade, if one exists.
+    """
     temp_df = trade_history_df.copy()
     temp_df['Portfolio Value Float'] = temp_df['Portfolio Value'].astype(float)
     
@@ -316,7 +319,7 @@ def analyze_trade_pairs(trade_history_df, full_data, TICKER):
         action = row['Action']
         
         if action.startswith('BUY'):
-            if buy_trade: buy_trade = None 
+            if buy_trade: buy_trade = None # Reset if last trade was a Buy and current is a Buy (should not happen in this sim)
             buy_trade = {
                 'buy_date': row['Date_dt'],
                 'buy_qqq_price': row['QQQ_Price'],
@@ -328,10 +331,9 @@ def analyze_trade_pairs(trade_history_df, full_data, TICKER):
                 sell_portfolio_value = Decimal(str(row['Portfolio Value Float']))
                 profit_loss = float(sell_portfolio_value - buy_trade['buy_portfolio_value'])
                 
-                # --- COLOR FIX: Ensure categorical string is clean and ADD A SORT KEY ---
                 is_profitable = profit_loss >= 0
                 p_l_category = ("Profit" if is_profitable else "Loss").strip() 
-                sort_key = 1 if is_profitable else 0 # 1 for Profit (Green), 0 for Loss (Red)
+                sort_key = 1 if is_profitable else 0
                 
                 trade_pairs.append({
                     'buy_date': buy_trade['buy_date'],
@@ -340,17 +342,50 @@ def analyze_trade_pairs(trade_history_df, full_data, TICKER):
                     'sell_qqq_price': row['QQQ_Price'],
                     'profit_loss': profit_loss,
                     'is_profitable_str': p_l_category, 
-                    'sort_key': sort_key, # <--- NEW FIELD FOR EXPLICIT ORDERING
+                    'sort_key': sort_key,
                     'asset': buy_trade['asset']
                 })
                 buy_trade = None
                 
-    return trade_pairs
+    # --- Check for Open Trade ---
+    open_trade = None
+    if buy_trade:
+        # If buy_trade is not None after the loop, it's an open position
+        last_date = full_data.index.max()
+        # Use the price of the actual asset held (TQQQ) for the P/L calculation's basis
+        asset_close_col = f'{buy_trade["asset"]}_close'
+        current_asset_price = full_data[asset_close_col].loc[last_date]
+        
+        # We need the asset price at the time of the BUY to determine the P/L
+        buy_asset_price = full_data[asset_close_col].loc[buy_trade['buy_date']]
+        
+        # Calculate P/L ratio to determine color
+        if buy_asset_price > 0:
+            current_profit_loss = current_asset_price - buy_asset_price
+            is_profitable = current_profit_loss >= 0
+            p_l_category = ("Profit" if is_profitable else "Loss").strip() 
+        else:
+            p_l_category = "Loss"
 
-def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_start_date):
+        # The chart plots QQQ price, so we use the corresponding QQQ prices for plotting data points
+        qqq_buy_price = buy_trade['buy_qqq_price']
+        qqq_current_price = full_data[qqq_close_col].loc[last_date]
+
+        open_trade = {
+            'buy_date': buy_trade['buy_date'],
+            'buy_qqq_price': qqq_buy_price,
+            'current_date': last_date,
+            'current_qqq_price': qqq_current_price,
+            'asset': buy_trade['asset'],
+            'is_profitable_str': p_l_category # Profit/Loss status used for color
+        }
+                
+    return trade_pairs, open_trade 
+
+def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_start_date, open_trade=None):
     """
-    Generates an Altair chart using explicit domain, range, and sort 
-    to guarantee Green/Red colors for trade segments.
+    Generates an Altair chart, including trade segments for completed trades
+    and a dotted projection for the open trade.
     """
     
     # --- Dynamic Chart Range Logic ---
@@ -373,9 +408,9 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     for i, trade in enumerate(trade_pairs):
         if trade['buy_date'].date() >= chart_start_date:
             p_l_category = trade['is_profitable_str']
-            sort_key = trade['sort_key'] # Fetch the new sort key
-            trade_segments.append({'trade_id': i, 'Date': trade['buy_date'], 'Price': trade['buy_qqq_price'], 'P_L_Category': p_l_category, 'Signal': 'Buy', 'P_L': trade['profit_loss'], 'Sort_Key': sort_key}) # Add Sort_Key
-            trade_segments.append({'trade_id': i, 'Date': trade['sell_date'], 'Price': trade['sell_qqq_price'], 'P_L_Category': p_l_category, 'Signal': 'Sell', 'P_L': trade['profit_loss'], 'Sort_Key': sort_key}) # Add Sort_Key
+            sort_key = trade['sort_key'] 
+            trade_segments.append({'trade_id': i, 'Date': trade['buy_date'], 'Price': trade['buy_qqq_price'], 'P_L_Category': p_l_category, 'Signal': 'Buy', 'P_L': trade['profit_loss'], 'Sort_Key': sort_key}) 
+            trade_segments.append({'trade_id': i, 'Date': trade['sell_date'], 'Price': trade['sell_qqq_price'], 'P_L_Category': p_l_category, 'Signal': 'Sell', 'P_L': trade['profit_loss'], 'Sort_Key': sort_key}) 
         
     df_segments = pd.DataFrame(trade_segments)
     
@@ -394,43 +429,59 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
         strokeDash=alt.condition(alt.datum.Metric == f'SMA_{SMA_PERIOD}', alt.value([5, 5]), alt.value([2, 2])),
     ).transform_filter((alt.datum.Metric != 'close'))
 
-    # 3. Trade Segments 
+    # 3. Trade Segments (Completed Trades - Solid Line) 
     segment_lines = alt.Chart(df_segments).mark_line(size=3).encode(
         x=alt.X('Date:T'),
         y=alt.Y('Price:Q'),
         detail='trade_id:N',
-        # Use Order channel to ensure trade segments draw correctly
         order=alt.Order('Sort_Key:Q'),
-        
-        # *** CRITICAL COLOR FIX: Use Conditional Encoding for guaranteed Profit/Loss colors ***
         color=alt.condition(
             alt.Predicate(field='P_L_Category', equal='Profit'),
             alt.value('#008000'), # Green
             alt.value('#d62728')  # Red
         ),
-        
         tooltip=[
             alt.Tooltip('P_L:Q', title='P/L', format='+.2f'),
             alt.Tooltip('P_L_Category:N', title='Outcome'),
         ]
     )
+
+    # 4. Open Trade Projection (Dotted Line)
+    open_line = alt.Chart(pd.DataFrame()).mark_line(size=2, strokeDash=[5, 5]).encode(
+        x='Date:T',
+        y='Price:Q'
+    ).properties(title="Open Trade") # Default placeholder chart
+
+    if open_trade and open_trade['asset'] != 'CASH':
+        # Create data points for the open trade line using QQQ prices for plotting
+        open_trade_data = pd.DataFrame([
+            {'Date': open_trade['buy_date'], 'Price': open_trade['buy_qqq_price'], 'P_L_Category': open_trade['is_profitable_str'], 'Trade_Type': 'Open Position'},
+            {'Date': open_trade['current_date'], 'Price': open_trade['current_qqq_price'], 'P_L_Category': open_trade['is_profitable_str'], 'Trade_Type': 'Open Position'}
+        ])
+        
+        # Filter for the visible chart range
+        open_trade_data = open_trade_data[open_trade_data['Date'].dt.date >= chart_start_date]
+        
+        if not open_trade_data.empty:
+            open_line = alt.Chart(open_trade_data).mark_line(size=3, strokeDash=[5, 5]).encode(
+                x=alt.X('Date:T'),
+                y=alt.Y('Price:Q'),
+                detail=alt.value(1), # Treat as one continuous line
+                color=alt.condition(
+                    alt.Predicate(field='P_L_Category', equal='Profit'),
+                    alt.value('#008000'), # Green (Profit)
+                    alt.value('#d62728')  # Red (Loss)
+                ),
+                tooltip=[
+                    alt.Tooltip('Date:T', title='Start Date'),
+                    alt.Tooltip('Price:Q', title='QQQ Price', format='$.2f'),
+                    alt.Tooltip('P_L_Category:N', title='Current Status'),
+                    alt.Tooltip('Trade_Type:N', title='Trade Type'),
+                ]
+            )
+
     
-    # Add a custom Legend for the Conditional Colors (since conditional encoding doesn't create a legend automatically)
-    legend_data = pd.DataFrame({
-        'Label': ['Profit', 'Loss'],
-        'Color': ['#008000', '#d62728']
-    })
-
-    legend_chart = alt.Chart(legend_data).mark_point().encode(
-        y=alt.Y('Label:N', axis=None, title='Trade P/L'),
-        color=alt.Color('Color', scale=None, title='Trade P/L'), 
-        size=alt.value(0) # Hide the actual points
-    ).properties(title="Trade P/L")
-
-    # Combine the main chart and the hidden legend chart (legend display might vary based on Streamlit/Altair versions)
-    # The simplest return remains the core chart, as the legend logic is complex to embed.
-    return (price_line + indicator_lines + segment_lines).interactive()
-
+    return (price_line + indicator_lines + segment_lines + open_line).interactive()
 
 # --- Streamlit Application (Remaining functions) ---
 
@@ -529,21 +580,22 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
     # Logic for dynamically setting the chart description
     if backtest_start >= ytd_start_date:
         chart_description = f"**Interactive Price and Trade Signal Chart (YTD View)**"
-        chart_caption = f"Chart shows YTD price with strategy indicators (extended) and trade segments overlaid for the backtest period (starting {backtest_start.strftime('%Y-%m-%d')})."
+        chart_caption = f"Chart shows YTD price with strategy indicators (extended) and completed trade segments overlaid for the backtest period (starting {backtest_start.strftime('%Y-%m-%d')}). **Open positions are shown as a dotted line.**"
     else:
         chart_description = f"**Interactive Price and Trade Signal Chart (Full Backtest View)**"
-        chart_caption = f"Chart shows the full backtest period price with strategy indicators (extended) and trade segments."
+        chart_caption = f"Chart shows the full backtest period price with strategy indicators (extended) and completed trade segments. **Open positions are shown as a dotted line.**"
         
     st.markdown(f"## 📈 {chart_description}")
     
     if len(trade_history_df[trade_history_df['Action'].str.startswith('BUY')]) > 0:
-        trade_pairs = analyze_trade_pairs(trade_history_df, full_data, TICKER)
+        # Generate trade pairs and check for open trade
+        trade_pairs, open_trade = analyze_trade_pairs(trade_history_df, full_data, TICKER)
         
-        # Reverted to use_container_width=True to avoid the Streamlit/Altair ValidationError
-        st.altair_chart(plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_start_date), use_container_width=True)
+        # Use the plotting function with the new open_trade argument
+        st.altair_chart(plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_start_date, open_trade), use_container_width=True)
         st.caption(chart_caption)
     else:
-        # Generate the price/indicator chart even if no trades occurred, but show a warning
+        # Handle case with no trades
         plot_data_for_display = signals_df.copy()
         if backtest_start >= ytd_start_date:
             plot_data_for_display = plot_data_for_display[plot_data_for_display.index.date >= ytd_start_date].copy()
@@ -562,7 +614,6 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
             strokeDash=alt.condition(alt.datum.Metric == f'SMA_{SMA_PERIOD}', alt.value([5, 5]), alt.value([2, 2])),
         ).transform_filter((alt.datum.Metric != 'close'))
 
-        # Reverted to use_container_width=True to avoid the Streamlit/Altair ValidationError
         st.altair_chart((price_line + indicator_lines).interactive(), use_container_width=True)
         st.warning("No trades were executed in the selected backtest period. Displaying price and indicators only.")
 
