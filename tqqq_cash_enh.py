@@ -281,33 +281,33 @@ def generate_signal(indicators, LEVERAGED_TICKER, MINI_VASL_MULTIPLIER):
         # Exit 1 (Hard Stop): Price < EMA 5 - (2.0 x ATR)
         if price < vasl_trigger_level:
             trade_ticker = 'CASH'
-            final_signal = f"SELL {LEVERAGED_TICKER} / CASH"
+            final_signal = f"SELL {LEVERAGED_TICKER} / CASH (DMA Bull - Hard Stop)"
             
         # Exit 2 (Soft Stop): Price < EMA 5 - (1.5 x ATR)
         elif price < mini_vasl_exit_level: 
              trade_ticker = 'CASH'
-             final_signal = f"SELL {LEVERAGED_TICKER} / CASH"
+             final_signal = f"SELL {LEVERAGED_TICKER} / CASH (DMA Bull - Soft Stop)"
         
         # MOMENTUM FILTER: Exit if EMA5 is below or equal to SMA20
         elif ema_5 <= sma_20:
              trade_ticker = 'CASH'
-             final_signal = f"SELL {LEVERAGED_TICKER} / CASH" 
+             final_signal = f"SELL {LEVERAGED_TICKER} / CASH (DMA Bull - Momentum Filter)" 
 
         # Entry/Hold: If neither stop nor momentum filter is hit
         else:
             trade_ticker = LEVERAGED_TICKER
-            final_signal = f"BUY {LEVERAGED_TICKER} / HOLD {LEVERAGED_TICKER}"
+            final_signal = f"BUY {LEVERAGED_TICKER} / HOLD {LEVERAGED_TICKER} (EMA5 > SMA20)"
                     
     else: 
         # --- DMA BEAR REGIME (AGGRESSIVE MOMENTUM FOCUS) ---
         if ema_5 > sma_20:
             # Aggressive Entry/Hold TQQQ for counter-trend bounce
             trade_ticker = LEVERAGED_TICKER
-            final_signal = f"BUY {LEVERAGED_TICKER} / HOLD {LEVERAGED_TICKER}"
+            final_signal = f"BUY {LEVERAGED_TICKER} / HOLD {LEVERAGED_TICKER} (Aggressive Momentum)"
         else:
             # Exit TQQQ or Hold CASH (Default)
             trade_ticker = 'CASH'
-            final_signal = "CASH"
+            final_signal = "CASH (Aggressive Momentum Exit/Default)"
 
     return {
         'signal': final_signal,
@@ -427,7 +427,8 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     plot_data = plot_data[plot_data.index.date >= chart_start_date].copy()
     plot_data.ta.sma(length=SMA_SHORT_PERIOD, append=True)
     
-    price_cols = ['close', f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{PERIOD}'] 
+    # FIX: Changed EMA_{PERIOD} to EMA_{EMA_PERIOD}
+    price_cols = ['close', f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'] 
     plot_data_long = plot_data.reset_index().rename(columns={'index': 'Date'})[['Date'] + price_cols].melt('Date', var_name='Metric', value_name='Price')
 
     # --- Trade Segment Data (Only drawn for the backtest period) ---
@@ -458,7 +459,7 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     indicator_lines = base.mark_line().encode(
         y=alt.Y('Price:Q'),
         color=alt.Color('Metric:N', 
-            scale=alt.Scale(domain=[f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{PERIOD}'], range=['orange', 'blue', 'purple']), 
+            scale=alt.Scale(domain=[f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'], range=['orange', 'blue', 'purple']), 
             legend=alt.Legend(title="Indicator (Click to Toggle)")
         ), 
         strokeDash=alt.condition(alt.datum.Metric == f'SMA_{SMA_PERIOD}', alt.value([5, 5]), alt.value([2, 2])),
@@ -644,7 +645,8 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
             plot_data_for_display = plot_data_for_display[plot_data_for_display.index.date >= ytd_start_date].copy()
             
         plot_data_for_display.ta.sma(length=SMA_SHORT_PERIOD, append=True)
-        price_cols = ['close', f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{PERIOD}'] 
+        # FIX: Changed EMA_{PERIOD} to EMA_{EMA_PERIOD} here as well
+        price_cols = ['close', f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'] 
         plot_data_long_no_trades = plot_data_for_display.reset_index().rename(columns={'index': 'Date'})[['Date'] + price_cols].melt('Date', var_name='Metric', value_name='Price')
         
         selection = alt.selection_point(fields=['Metric'], bind='legend', name='MetricSelect') 
@@ -653,7 +655,9 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
             y=alt.Y('Price:Q', title=f'{TICKER} Price ($)'), color=alt.value('gray'), tooltip=[alt.Tooltip('Price:Q', format='$.2f', title=f'{TICKER} Price')],
         ).transform_filter(alt.datum.Metric == 'close')
         indicator_lines = base.mark_line().encode(
-            y=alt.Y('Price:Q'), color=alt.Color('Metric:N', scale=alt.Scale(domain=[f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{PERIOD}'], range=['orange', 'blue', 'purple']), legend=alt.Legend(title="Indicator (Click to Toggle)")), 
+            y=alt.Y('Price:Q'), 
+            # FIX: Changed EMA_{PERIOD} to EMA_{EMA_PERIOD} here as well
+            color=alt.Color('Metric:N', scale=alt.Scale(domain=[f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'], range=['orange', 'blue', 'purple']), legend=alt.Legend(title="Indicator (Click to Toggle)")), 
             strokeDash=alt.condition(alt.datum.Metric == f'SMA_{SMA_PERIOD}', alt.value([5, 5]), alt.value([2, 2])), opacity=alt.condition(selection, alt.value(1.0), alt.value(0.1)),
             tooltip=[alt.Tooltip('Metric:N', title='Indicator'), alt.Tooltip('Price:Q', format='$.2f', title='Value')],
         ).add_params(selection).transform_filter((alt.datum.Metric != 'close'))
