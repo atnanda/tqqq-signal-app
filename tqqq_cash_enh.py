@@ -579,7 +579,7 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
         calc_cagr = lambda final, initial, years: ((final / initial) ** (1 / years) - 1) * 100 if final > 0 and initial > 0 and years > 0 else 0.0
         strategy_cagr = calc_cagr(final_value, initial_float, years_held)
 
-        # QQQ and TQQQ B&H Metrics
+        # QQQ and TQQQ B&H Metrics (RE-ENABLED)
         bh_qqq_return = (bh_qqq/initial_float - 1) * 100
         bh_qqq_cagr = calc_cagr(bh_qqq, initial_float, years_held)
         bh_qqq_mdd = calculate_max_drawdown(sim_df['BH_QQQ_Value'])
@@ -607,29 +607,17 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
     col_price, col_conviction = st.columns([1, 1])
     
     col_price.metric("Price Used", f"${indicators['current_price']:.2f}", help=f"Source: {price_source}")
-    col_conviction.caption(f"**Conviction:** {signal_results['conviction']}")
+    # REMOVED: col_conviction.caption(f"**Conviction:** {signal_results['conviction']}")
 
     st.markdown("---")
 
-    # --- 3. Volatility Stops ---
-    st.subheader("Volatility Stops (Based on EOD Indicators)")
-    
-    col_bull, col_bear = st.columns(2)
-    
-    col_bull.markdown("#### DMA Bull Stops (Long Exit)")
-    col_bull.metric(f"Mini-VASL Exit ({current_mini_vasl_multiplier:.1f}x ATR)", f"${signal_results['mini_vasl_down']:.2f}")
-    col_bull.metric(f"VASL Trigger ({ATR_MULTIPLIER:.1f}x ATR)", f"${signal_results['vasl_down']:.2f}")
+    # REMOVED ENTIRE "3. Volatility Stops" SECTION
 
-    col_bear.markdown("#### DMA Bear Stops (Aggressive Entry/Monitoring)")
-    col_bear.metric(f"Inverse Mini-VASL ({current_mini_vasl_multiplier:.1f}x ATR)", f"${signal_results['mini_vasl_up']:.2f}", help="Used for aggressive long entry/exit monitoring in DMA Bear regime.")
-    col_bear.metric(f"Inverse VASL ({ATR_MULTIPLIER:.1f}x ATR)", f"${signal_results['vasl_up']:.2f}", help="Used for aggressive long entry/exit monitoring in DMA Bear regime.")
-    
-    st.markdown("---")
-    
     # --- Performance Summary ---
     st.markdown("## 📊 Backtest Performance Summary")
     
     summary_data = {
+        # RE-ENABLED QQQ and TQQQ B&H
         'Metric': [f"Strategy ({LEVERAGED_TICKER})", f"B&H {TICKER}", f"B&H {LEVERAGED_TICKER}"], 
         'Final Value': [final_value, bh_qqq, bh_tqqq],
         'Total Return': [(final_value/initial_float - 1) * 100, bh_qqq_return, bh_tqqq_return], 
@@ -656,6 +644,7 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
     st.markdown(f"## 📈 {chart_description}")
     
     if len(trade_history_df[trade_history_df['Action'].str.startswith('BUY')]) > 0:
+        # Re-analyze trades here to ensure we have the counts for the next section header
         trade_pairs, open_trade = analyze_trade_pairs(trade_history_df, full_data, TICKER)
         st.altair_chart(plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_start_date, open_trade), use_container_width=True)
         st.caption(chart_caption)
@@ -666,7 +655,7 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
             plot_data_for_display = plot_data_for_display[plot_data_for_display.index.date >= ytd_start_date].copy()
             
         plot_data_for_display.ta.sma(length=SMA_SHORT_PERIOD, append=True)
-        price_cols = ['close', f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'] 
+        price_cols = ['close', f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{PERIOD}'] 
         plot_data_long_no_trades = plot_data_for_display.reset_index().rename(columns={'index': 'Date'})[['Date'] + price_cols].melt('Date', var_name='Metric', value_name='Price')
         
         selection = alt.selection_point(fields=['Metric'], bind='legend', name='MetricSelect') 
@@ -675,7 +664,7 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
             y=alt.Y('Price:Q', title=f'{TICKER} Price ($)'), color=alt.value('gray'), tooltip=[alt.Tooltip('Price:Q', format='$.2f', title=f'{TICKER} Price')],
         ).transform_filter(alt.datum.Metric == 'close')
         indicator_lines = base.mark_line().encode(
-            y=alt.Y('Price:Q'), color=alt.Color('Metric:N', scale=alt.Scale(domain=[f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'], range=['orange', 'blue', 'purple']), legend=alt.Legend(title="Indicator (Click to Toggle)")), 
+            y=alt.Y('Price:Q'), color=alt.Color('Metric:N', scale=alt.Scale(domain=[f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{PERIOD}'], range=['orange', 'blue', 'purple']), legend=alt.Legend(title="Indicator (Click to Toggle)")), 
             strokeDash=alt.condition(alt.datum.Metric == f'SMA_{SMA_PERIOD}', alt.value([5, 5]), alt.value([2, 2])), opacity=alt.condition(selection, alt.value(1.0), alt.value(0.1)),
             tooltip=[alt.Tooltip('Metric:N', title='Indicator'), alt.Tooltip('Price:Q', format='$.2f', title='Value')],
         ).add_params(selection).transform_filter((alt.datum.Metric != 'close'))
@@ -684,17 +673,20 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
         st.warning("No trades were executed in the selected backtest period. Displaying price and indicators only.")
 
     # --- Detailed Trade History ---
-    with st.expander("🧾 Detailed Trade History (Click to Expand)"):
+    
+    # CALCULATE TRADE STATS FOR HEADER
+    if 'trade_pairs' not in locals():
+        # Fallback in case the plot section (which normally calculates it) was skipped
+        trade_pairs, _ = analyze_trade_pairs(trade_history_df, full_data, TICKER)
         
-        # Calculate Trade Statistics
-        trade_pairs, open_trade = analyze_trade_pairs(trade_history_df, full_data, TICKER)
-        total_trades = len(trade_pairs)
-        profitable_trades = sum(1 for trade in trade_pairs if trade['is_profitable_str'] == 'Profit')
-        loss_trades = total_trades - profitable_trades
+    total_trades = len(trade_pairs)
+    profitable_trades = sum(1 for trade in trade_pairs if trade['is_profitable_str'] == 'Profit')
+    loss_trades = total_trades - profitable_trades
 
-        # Display Trade Statistics
-        st.markdown(f"**Trade Statistics:** Total Trades: `{total_trades}`, Profitable: `{profitable_trades}`, Loss: `{loss_trades}`")
-        
+    # UPDATE EXPANDER HEADER WITH BRACKETED STATS
+    header_title = f"🧾 Detailed Trade History (Total Trades: {total_trades}, Profitable: {profitable_trades}, Loss: {loss_trades})"
+    
+    with st.expander(header_title):
         trade_history_display = trade_history_df.copy()
         trade_history_display['Date'] = trade_history_display['Date'].astype(str)
         
