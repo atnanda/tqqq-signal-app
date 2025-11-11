@@ -271,7 +271,6 @@ def generate_signal(indicators, LEVERAGED_TICKER, MINI_VASL_MULTIPLIER):
     
     # --- START SIGNAL LOGIC (FINAL MOMENTUM FILTER) ---
     trade_ticker = 'CASH'
-    conviction_status = "N/A"
     final_signal = "CASH (Default)" 
 
     dma_bull_price = (price >= sma_200)
@@ -282,44 +281,37 @@ def generate_signal(indicators, LEVERAGED_TICKER, MINI_VASL_MULTIPLIER):
         # Exit 1 (Hard Stop): Price < EMA 5 - (2.0 x ATR)
         if price < vasl_trigger_level:
             trade_ticker = 'CASH'
-            conviction_status = "DMA Bull - VASL Triggered (2.0x ATR Exit)"
-            final_signal = f"SELL {LEVERAGED_TICKER} / CASH (DMA Bull - Hard Stop)"
+            final_signal = f"SELL {LEVERAGED_TICKER} / CASH"
             
         # Exit 2 (Soft Stop): Price < EMA 5 - (1.5 x ATR)
         elif price < mini_vasl_exit_level: 
              trade_ticker = 'CASH'
-             conviction_status = f"DMA Bull - Mini-VASL Exit ({MINI_VASL_MULTIPLIER:.1f}x ATR Exit)"
-             final_signal = f"SELL {LEVERAGED_TICKER} / CASH (DMA Bull - Soft Stop)"
+             final_signal = f"SELL {LEVERAGED_TICKER} / CASH"
         
         # MOMENTUM FILTER: Exit if EMA5 is below or equal to SMA20
         elif ema_5 <= sma_20:
              trade_ticker = 'CASH'
-             conviction_status = "DMA Bull - Momentum Filter Failed (EMA5 <= SMA20)" 
-             final_signal = f"SELL {LEVERAGED_TICKER} / CASH (DMA Bull - Momentum Filter)" 
+             final_signal = f"SELL {LEVERAGED_TICKER} / CASH" 
 
         # Entry/Hold: If neither stop nor momentum filter is hit
         else:
             trade_ticker = LEVERAGED_TICKER
-            conviction_status = f"DMA - Bull ({LEVERAGED_TICKER} Entry/Hold)"
-            final_signal = f"BUY {LEVERAGED_TICKER} / HOLD {LEVERAGED_TICKER} (EMA5 > SMA20)"
+            final_signal = f"BUY {LEVERAGED_TICKER} / HOLD {LEVERAGED_TICKER}"
                     
     else: 
         # --- DMA BEAR REGIME (AGGRESSIVE MOMENTUM FOCUS) ---
         if ema_5 > sma_20:
             # Aggressive Entry/Hold TQQQ for counter-trend bounce
             trade_ticker = LEVERAGED_TICKER
-            conviction_status = f"DMA - Bear ({LEVERAGED_TICKER} Aggressive Entry/Hold)"
-            final_signal = f"BUY {LEVERAGED_TICKER} / HOLD {LEVERAGED_TICKER} (Aggressive Momentum)"
+            final_signal = f"BUY {LEVERAGED_TICKER} / HOLD {LEVERAGED_TICKER}"
         else:
             # Exit TQQQ or Hold CASH (Default)
             trade_ticker = 'CASH'
-            conviction_status = "DMA - Bear (Stay CASH - Momentum Failed)"
-            final_signal = "CASH (Aggressive Momentum Exit/Default)"
+            final_signal = "CASH"
 
     return {
         'signal': final_signal,
         'trade_ticker': trade_ticker,
-        'conviction': conviction_status,
         'vasl_down': vasl_trigger_level,
         'mini_vasl_down': mini_vasl_exit_level,
         'vasl_up': inverse_vasl_level,
@@ -435,7 +427,7 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     plot_data = plot_data[plot_data.index.date >= chart_start_date].copy()
     plot_data.ta.sma(length=SMA_SHORT_PERIOD, append=True)
     
-    price_cols = ['close', f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'] 
+    price_cols = ['close', f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{PERIOD}'] 
     plot_data_long = plot_data.reset_index().rename(columns={'index': 'Date'})[['Date'] + price_cols].melt('Date', var_name='Metric', value_name='Price')
 
     # --- Trade Segment Data (Only drawn for the backtest period) ---
@@ -466,7 +458,7 @@ def plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_star
     indicator_lines = base.mark_line().encode(
         y=alt.Y('Price:Q'),
         color=alt.Color('Metric:N', 
-            scale=alt.Scale(domain=[f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}'], range=['orange', 'blue', 'purple']), 
+            scale=alt.Scale(domain=[f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{PERIOD}'], range=['orange', 'blue', 'purple']), 
             legend=alt.Legend(title="Indicator (Click to Toggle)")
         ), 
         strokeDash=alt.condition(alt.datum.Metric == f'SMA_{SMA_PERIOD}', alt.value([5, 5]), alt.value([2, 2])),
@@ -579,7 +571,7 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
         calc_cagr = lambda final, initial, years: ((final / initial) ** (1 / years) - 1) * 100 if final > 0 and initial > 0 and years > 0 else 0.0
         strategy_cagr = calc_cagr(final_value, initial_float, years_held)
 
-        # QQQ and TQQQ B&H Metrics (RE-ENABLED)
+        # QQQ and TQQQ B&H Metrics
         bh_qqq_return = (bh_qqq/initial_float - 1) * 100
         bh_qqq_cagr = calc_cagr(bh_qqq, initial_float, years_held)
         bh_qqq_mdd = calculate_max_drawdown(sim_df['BH_QQQ_Value'])
@@ -601,23 +593,21 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
     
     col_action, col_ticker = st.columns([3, 1])
     
-    col_action.markdown(f"## :rotating_light: **{signal_results['signal']}**")
+    # MODIFIED: Removed content in brackets (e.g., "(DMA Bull - Hard Stop)") from the signal display
+    cleaned_signal = signal_results['signal'].split('(')[0].strip()
+    col_action.markdown(f"## :rotating_light: **{cleaned_signal}**")
     col_ticker.markdown(f"## **{signal_results['trade_ticker']}**")
     
-    col_price, col_conviction = st.columns([1, 1])
+    col_price, _ = st.columns([1, 1])
     
     col_price.metric("Price Used", f"${indicators['current_price']:.2f}", help=f"Source: {price_source}")
-    # REMOVED: col_conviction.caption(f"**Conviction:** {signal_results['conviction']}")
 
     st.markdown("---")
-
-    # REMOVED ENTIRE "3. Volatility Stops" SECTION
 
     # --- Performance Summary ---
     st.markdown("## 📊 Backtest Performance Summary")
     
     summary_data = {
-        # RE-ENABLED QQQ and TQQQ B&H
         'Metric': [f"Strategy ({LEVERAGED_TICKER})", f"B&H {TICKER}", f"B&H {LEVERAGED_TICKER}"], 
         'Final Value': [final_value, bh_qqq, bh_tqqq],
         'Total Return': [(final_value/initial_float - 1) * 100, bh_qqq_return, bh_tqqq_return], 
@@ -644,7 +634,6 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
     st.markdown(f"## 📈 {chart_description}")
     
     if len(trade_history_df[trade_history_df['Action'].str.startswith('BUY')]) > 0:
-        # Re-analyze trades here to ensure we have the counts for the next section header
         trade_pairs, open_trade = analyze_trade_pairs(trade_history_df, full_data, TICKER)
         st.altair_chart(plot_trade_signals(signals_df, trade_pairs, TICKER, backtest_start, ytd_start_date, open_trade), use_container_width=True)
         st.caption(chart_caption)
@@ -683,7 +672,7 @@ def run_analysis(backtest_start_date, target_signal_date, TICKER, LEVERAGED_TICK
     profitable_trades = sum(1 for trade in trade_pairs if trade['is_profitable_str'] == 'Profit')
     loss_trades = total_trades - profitable_trades
 
-    # UPDATE EXPANDER HEADER WITH BRACKETED STATS
+    # EXPANDER HEADER WITH BRACKETED STATS
     header_title = f"🧾 Detailed Trade History (Total Trades: {total_trades}, Profitable: {profitable_trades}, Loss: {loss_trades})"
     
     with st.expander(header_title):
