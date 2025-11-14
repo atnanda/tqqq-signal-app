@@ -28,7 +28,8 @@ MINI_VASL_MULTIPLIER = 1.5
 def get_last_closed_trading_day():
     """Determines the most recent CLOSED trading day."""
     today = date.today()
-    last_day = today - timedelta(days=1)
+    # last_day = today - timedelta(days=1)
+    last_day = today
     while last_day.weekday() > 4: # 5 is Sat, 6 is Sun
         last_day -= timedelta(days=1)
     return last_day
@@ -737,3 +738,4 @@ def main_app():
 
 if __name__ == "__main__":
     main_app()
+
