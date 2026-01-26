@@ -37,7 +37,7 @@ def get_last_closed_trading_day():
 
 def get_default_ytd_start_date(today_date):
     # return date(today_date.year, 1, 1)
-    return date(2018, 1, 1)
+    return date(2025, 1, 1)
 
 
 @st.cache_data(ttl=24*3600)
@@ -302,4 +302,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
