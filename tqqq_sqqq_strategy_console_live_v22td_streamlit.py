@@ -36,18 +36,14 @@ def get_last_closed_trading_day():
     return target_date
 
 def get_default_ytd_start_date(today_date):
-    # return date(today_date.year, 1, 1)
-    return date(2025, 1, 1)
-
+    return date(today_date.year, 1, 1)
 
 @st.cache_data(ttl=24*3600)
 def fetch_historical_data(end_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER):
     start_date = TQQQ_INCEPTION_DATE
     tickers = [TICKER, LEVERAGED_TICKER, INVERSE_TICKER]
-    market_end_date = end_date + timedelta(days=1) 
     try:
-        # auto_adjust=False ensures 'Adj Close' is available for strategy math
-        all_data = yf.download(tickers, start=start_date, end=market_end_date, interval="1d", progress=False, auto_adjust=False)
+        all_data = yf.download(tickers, start=start_date, end=end_date + timedelta(days=1), progress=False, auto_adjust=False)
         if all_data.empty: return pd.DataFrame()
         
         df_combined = pd.DataFrame(index=all_data.index)
@@ -94,7 +90,7 @@ def calculate_indicators(data_daily, target_date, current_price):
         'adx': df['ADX'].iloc[-1]
     }
 
-# --- Visual/Chart Helpers (from tqqq_cash_enh) ---
+# --- Visual/Chart Helpers ---
 
 def analyze_trade_pairs(trade_history_df, full_data, TICKER):
     temp_df = trade_history_df.copy()
@@ -121,37 +117,32 @@ def plot_v22td_signals(signals_df, trade_pairs, TICKER, start_date):
     plot_data = signals_df[signals_df.index.date >= start_date].copy()
     plot_data.ta.sma(length=SMA_SHORT_PERIOD, append=True)
     
-    # Prep Long Format for Altair legend selection
     price_cols = ['close', f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}']
     plot_long = plot_data.reset_index().rename(columns={'index': 'Date'})[['Date'] + price_cols].melt('Date', var_name='Metric', value_name='Price')
 
     selection = alt.selection_point(fields=['Metric'], bind='legend', name='MetricSelect') 
     base = alt.Chart(plot_long).encode(x=alt.X('Date:T', title='Date')).properties(height=500)
     
-    # Gray Price Line
     price_line = base.mark_line(color='gray', opacity=0.4, size=1).encode(
         y=alt.Y('Price:Q', title=f'{TICKER} Price ($)'),
         tooltip=[alt.Tooltip('Price:Q', format='$.2f')]
     ).transform_filter(alt.datum.Metric == 'close')
     
-    # Toggable Indicators
     indicators = base.mark_line().encode(
         y='Price:Q',
         color=alt.Color('Metric:N', scale=alt.Scale(domain=price_cols[1:], range=['orange', 'blue', 'purple'])),
         opacity=alt.condition(selection, alt.value(1.0), alt.value(0.1))
     ).add_params(selection).transform_filter(alt.datum.Metric != 'close')
 
-    # Trade Segments (The colored lines showing trade duration)
     df_segments = []
     for i, t in enumerate(trade_pairs):
-        df_segments.append({'tid': i, 'Date': t['buy_date'], 'Price': t['buy_price'], 'Cat': t['is_profitable_str'], 'Sort': t['sort_key']})
-        df_segments.append({'tid': i, 'Date': t['sell_date'], 'Price': t['sell_price'], 'Cat': t['is_profitable_str'], 'Sort': t['sort_key']})
+        df_segments.append({'tid': i, 'Date': t['buy_date'], 'Price': t['buy_price'], 'Cat': t['is_profitable_str']})
+        df_segments.append({'tid': i, 'Date': t['sell_date'], 'Price': t['sell_price'], 'Cat': t['is_profitable_str']})
     
     segments = alt.Chart(pd.DataFrame(df_segments)).mark_line(size=3).encode(
         x='Date:T', y='Price:Q', detail='tid:N',
         color=alt.condition(alt.datum.Cat == 'Profit', alt.value('#008000'), alt.value('#d62728'))
     )
-
     return (price_line + indicators + segments).interactive()
 
 # --- Execution Engine ---
@@ -171,11 +162,10 @@ def generate_historical_signals(df, LEVERAGED_TICKER, mini_vasl_mult, adx_thresh
     for index, row in df.iterrows():
         if pd.isna(row[f'SMA_{SMA_PERIOD}']): continue
         price, ema5, sma200, sma20, slope, atr, adx = row['close'], row[f'EMA_{EMA_PERIOD}'], row[f'SMA_{SMA_PERIOD}'], row[f'SMA_{SMA_SHORT_PERIOD}'], row['SMA_20_slope'], row['ATR'], row['ADX']
-        
         vasl, mini_vasl = ema5 - (2.0 * atr), ema5 - (mini_vasl_mult * atr)
         
         if price >= sma200:
-            target = LEVERAGED_TICKER if (adx >= adx_threshold and price >= vasl and price >= mini_vasl and ema5 >= sma200) else 'CASH'
+            target = LEVERAGED_TICKER if (adx >= adx_threshold and price >= vasl and price >= mini_vasl) else 'CASH'
         else:
             target = LEVERAGED_TICKER if (ema5 > sma20 and slope > 0) else 'CASH'
         df.at[index, 'Trade_Ticker'] = target
@@ -207,7 +197,6 @@ def run_tax_sim(signals_df, start_date, TICKER, LEVERAGED_TICKER, tax_rate):
 
         if current_ticker != 'CASH': portfolio_value = shares * prices[current_ticker]
         
-        # Annual Tax Logic
         if (i == len(sim_df)-1) or (sim_df.index[i+1].year > row.name.year):
             tax_due = max(Decimal("0"), (yearly_gain - loss_carry) * Decimal(str(tax_rate)))
             if tax_due > 0:
@@ -221,7 +210,7 @@ def run_tax_sim(signals_df, start_date, TICKER, LEVERAGED_TICKER, tax_rate):
         sim_df.at[row.name, 'Portfolio_Value'] = float(portfolio_value)
     return sim_df, pd.DataFrame(history), pd.DataFrame(tax_logs)
 
-# --- Main App Interface (tqqq_cash_enh style) ---
+# --- Main App Interface ---
 
 def main():
     st.set_page_config(layout="wide", page_title="TQQQ v22td Pro")
@@ -234,49 +223,37 @@ def main():
         st.header("Strategy Parameters")
         TICKER = st.text_input("Underlying", "QQQ")
         LEVERAGED_TICKER = st.text_input("Leveraged (3x)", "TQQQ")
-        
-        st.subheader("Period")
         start_date = st.date_input("Start Date", get_default_ytd_start_date(last_day))
-        end_date = st.date_input("End Date", last_day)
-        
-        st.subheader("Risk & Tax")
         adx_t = st.slider("ADX Sideways Threshold", 0.0, 25.0, 12.0)
         m_vasl = st.number_input("Mini-VASL Multiplier", 0.0, 3.0, 1.5)
         st_tax = st.number_input("Annual Tax Rate", 0.0, 0.5, 0.25)
-        
         if st.button("Run Analysis", type="primary"): st.rerun()
 
-    # Data & Calculations
-    data = fetch_historical_data(end_date, TICKER, LEVERAGED_TICKER, "SQQQ")
+    data = fetch_historical_data(last_day, TICKER, LEVERAGED_TICKER, "SQQQ")
     if data.empty: return
 
-    inds = calculate_indicators(data, end_date, data['close'].iloc[-1])
+    inds = calculate_indicators(data, last_day, data['close'].iloc[-1])
     sig_df = generate_historical_signals(data, LEVERAGED_TICKER, m_vasl, adx_t)
     results, history, tax_logs = run_tax_sim(sig_df, start_date, TICKER, LEVERAGED_TICKER, st_tax)
 
-    # 1. LIVE SIGNAL HEADER (Exact match to cash_enh)
+    # 1. LIVE SIGNAL HEADER (ADX REMOVED)
     st.subheader("Live Trading Signal")
     col_act, col_tick = st.columns([3, 1])
     
-    # Clean logic for the header
     curr_sig = history.iloc[-1]['Action'] if not history.empty else "CASH"
     status = "BUY/HOLD" if LEVERAGED_TICKER in curr_sig else "CASH"
     
     col_act.markdown(f"## :rotating_light: **{status}**")
     col_tick.markdown(f"## **{LEVERAGED_TICKER if status == 'BUY/HOLD' else 'CASH'}**")
     
-    # Additional Indicators row
-    m1, m2, m3 = st.columns(3)
+    m1, m2 = st.columns(2)
     m1.metric(f"{TICKER} Price", f"${inds['current_price']:.2f}")
-    m2.metric("ADX Strength", f"{inds['adx']:.1f}")
-    m3.metric("Regime", "BULL" if inds['current_price'] >= inds['sma_200'] else "BEAR")
+    m2.metric("Market Regime", "BULL" if inds['current_price'] >= inds['sma_200'] else "BEAR")
     st.markdown("---")
 
-    # 2. PERFORMANCE SUMMARY (Exact match to cash_enh)
+    # 2. PERFORMANCE SUMMARY
     st.markdown("## 📊 Backtest Performance Summary")
     final_v = results['Portfolio_Value'].iloc[-1]
-    
-    # Normalize benchmarks
     bh_q = (data[f'{TICKER}_close'].loc[results.index[-1]] / data[f'{TICKER}_close'].loc[results.index[0]]) * 10000
     bh_t = (data[f'{LEVERAGED_TICKER}_close'].loc[results.index[-1]] / data[f'{LEVERAGED_TICKER}_close'].loc[results.index[0]]) * 10000
 
@@ -287,20 +264,14 @@ def main():
     })
     st.dataframe(summary_df.style.format({'Final Value': '${:,.2f}', 'Total Return': '{:+.2f}%'}), hide_index=True, width='stretch')
 
-    # 3. INTERACTIVE CHART (Exact match to cash_enh)
+    # 3. INTERACTIVE CHART
     st.markdown("## 📈 Interactive Price and Trade Signal Chart")
     trade_pairs = analyze_trade_pairs(history, data, TICKER)
     st.altair_chart(plot_v22td_signals(sig_df, trade_pairs, TICKER, start_date), use_container_width=True)
-    st.caption("Gray line: Underlying price. Colored segments: Strategy trade duration (Green=Profit, Red=Loss). Indicators toggleable via legend.")
 
-    # 4. TRADE HISTORY (Exact match to cash_enh expander)
-    total_trades = len(trade_pairs)
-    prof = sum(1 for t in trade_pairs if t['profit_loss'] >= 0)
-    
-    with st.expander(f"🧾 Detailed Trade History (Total: {total_trades}, Profitable: {prof}, Loss: {total_trades-prof})"):
+    # 4. TRADE HISTORY
+    with st.expander("🧾 Detailed Trade History"):
         st.dataframe(history.style.format({'Portfolio Value': '${:,.2f}'}), hide_index=True, width='stretch')
 
 if __name__ == "__main__":
     main()
-
-
