@@ -20,8 +20,9 @@ SMA_PERIOD = 200
 SMA_SHORT_PERIOD = 20
 INITIAL_INVESTMENT = Decimal("10000.00")
 TQQQ_INCEPTION_DATE = date(2010, 2, 9)
+DEFAULT_ADX_THRESHOLD = 12.0 # Hidden from UI, kept for strategy logic
 
-# --- Helper Functions (v22td Logic) ---
+# --- Helper Functions ---
 
 def get_last_closed_trading_day():
     new_york_tz = pytz.timezone('America/New_York')
@@ -66,8 +67,8 @@ def calculate_true_range_and_atr(df, atr_period):
     high_minus_low = df['high'] - df['low']
     high_minus_prev_close = np.abs(df['high'] - df['close'].shift(1))
     low_minus_prev_close = np.abs(df['low'] - df['close'].shift(1))
-    true_range = pd.DataFrame({'hl': high_minus_low, 'hpc': high_minus_prev_close, 'lpc': low_minus_prev_close}).max(axis=1)
-    return true_range.ewm(span=atr_period, adjust=False, min_periods=atr_period).mean()
+    tr = pd.DataFrame({'hl': high_minus_low, 'hpc': high_minus_prev_close, 'lpc': low_minus_prev_close}).max(axis=1)
+    return tr.ewm(span=atr_period, adjust=False, min_periods=atr_period).mean()
 
 @st.cache_data(ttl=6*3600)
 def calculate_indicators(data_daily, target_date, current_price):
@@ -86,8 +87,7 @@ def calculate_indicators(data_daily, target_date, current_price):
         'sma_20': df[f'SMA_{SMA_SHORT_PERIOD}'].iloc[-1],
         'sma_20_slope': df['SMA_20_slope'].iloc[-1],
         'ema_5': df[f'EMA_{EMA_PERIOD}'].iloc[-1],
-        'atr': df['ATR'].ffill().iloc[-1],
-        'adx': df['ADX'].iloc[-1]
+        'atr': df['ATR'].ffill().iloc[-1]
     }
 
 # --- Visual/Chart Helpers ---
@@ -107,16 +107,13 @@ def analyze_trade_pairs(trade_history_df, full_data, TICKER):
             trade_pairs.append({
                 'buy_date': buy_trade['date'], 'sell_date': row['Date_dt'],
                 'buy_price': buy_trade['price'], 'sell_price': row[f'{TICKER}_close'],
-                'profit_loss': pl, 'is_profitable_str': "Profit" if pl >= 0 else "Loss",
-                'sort_key': 1 if pl >= 0 else 0
+                'profit_loss': pl, 'is_profitable_str': "Profit" if pl >= 0 else "Loss"
             })
             buy_trade = None
     return trade_pairs
 
 def plot_v22td_signals(signals_df, trade_pairs, TICKER, start_date):
     plot_data = signals_df[signals_df.index.date >= start_date].copy()
-    plot_data.ta.sma(length=SMA_SHORT_PERIOD, append=True)
-    
     price_cols = ['close', f'SMA_{SMA_PERIOD}', f'SMA_{SMA_SHORT_PERIOD}', f'EMA_{EMA_PERIOD}']
     plot_long = plot_data.reset_index().rename(columns={'index': 'Date'})[['Date'] + price_cols].melt('Date', var_name='Metric', value_name='Price')
 
@@ -148,7 +145,7 @@ def plot_v22td_signals(signals_df, trade_pairs, TICKER, start_date):
 # --- Execution Engine ---
 
 @st.cache_data(ttl=24*3600)
-def generate_historical_signals(df, LEVERAGED_TICKER, mini_vasl_mult, adx_threshold):
+def generate_historical_signals(df, LEVERAGED_TICKER, mini_vasl_mult):
     df = df.copy()
     df.ta.sma(length=SMA_PERIOD, append=True)
     df.ta.sma(length=SMA_SHORT_PERIOD, append=True)
@@ -165,7 +162,7 @@ def generate_historical_signals(df, LEVERAGED_TICKER, mini_vasl_mult, adx_thresh
         vasl, mini_vasl = ema5 - (2.0 * atr), ema5 - (mini_vasl_mult * atr)
         
         if price >= sma200:
-            target = LEVERAGED_TICKER if (adx >= adx_threshold and price >= vasl and price >= mini_vasl) else 'CASH'
+            target = LEVERAGED_TICKER if (adx >= DEFAULT_ADX_THRESHOLD and price >= vasl and price >= mini_vasl) else 'CASH'
         else:
             target = LEVERAGED_TICKER if (ema5 > sma20 and slope > 0) else 'CASH'
         df.at[index, 'Trade_Ticker'] = target
@@ -224,7 +221,7 @@ def main():
         TICKER = st.text_input("Underlying", "QQQ")
         LEVERAGED_TICKER = st.text_input("Leveraged (3x)", "TQQQ")
         start_date = st.date_input("Start Date", get_default_ytd_start_date(last_day))
-        adx_t = st.slider("ADX Sideways Threshold", 0.0, 25.0, 12.0)
+        # Mini-VASL ATR multiplier is still useful for risk tuning
         m_vasl = st.number_input("Mini-VASL Multiplier", 0.0, 3.0, 1.5)
         st_tax = st.number_input("Annual Tax Rate", 0.0, 0.5, 0.25)
         if st.button("Run Analysis", type="primary"): st.rerun()
@@ -233,13 +230,12 @@ def main():
     if data.empty: return
 
     inds = calculate_indicators(data, last_day, data['close'].iloc[-1])
-    sig_df = generate_historical_signals(data, LEVERAGED_TICKER, m_vasl, adx_t)
+    sig_df = generate_historical_signals(data, LEVERAGED_TICKER, m_vasl)
     results, history, tax_logs = run_tax_sim(sig_df, start_date, TICKER, LEVERAGED_TICKER, st_tax)
 
-    # 1. LIVE SIGNAL HEADER (ADX REMOVED)
+    # 1. LIVE SIGNAL HEADER
     st.subheader("Live Trading Signal")
     col_act, col_tick = st.columns([3, 1])
-    
     curr_sig = history.iloc[-1]['Action'] if not history.empty else "CASH"
     status = "BUY/HOLD" if LEVERAGED_TICKER in curr_sig else "CASH"
     
