@@ -1,10 +1,11 @@
 # requirements.txt
-pandas
-yfinance
-pandas-ta
-numpy
-streamlit
-plotly
+pandas>=2.2.0
+yfinance>=0.2.40
+pandas-ta>=0.3.14b0
+numpy>=1.26.0
+streamlit>=1.37.0
+plotly>=5.20.0
 pytz
-altair
+altair>=5.3.0
+
 
