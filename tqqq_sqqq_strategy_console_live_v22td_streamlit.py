@@ -36,7 +36,9 @@ def get_last_closed_trading_day():
     return target_date
 
 def get_default_ytd_start_date(today_date):
-    return date(today_date.year, 1, 1)
+    # return date(today_date.year, 1, 1)
+    return date(2018, 1, 1)
+
 
 @st.cache_data(ttl=24*3600)
 def fetch_historical_data(end_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER):
@@ -300,3 +302,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
