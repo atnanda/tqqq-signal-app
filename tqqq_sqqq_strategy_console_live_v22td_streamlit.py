@@ -186,7 +186,7 @@ def run_tax_sim(signals_df, start_date, TICKER, LEVERAGED_TICKER, tax_rate, ltcg
 
 def main_app():
     st.set_page_config(layout="wide", page_title="TQQQ v22td After-Tax Backtester")
-    st.title("⭐ TQQQ Volatility Strategy (v22td)")
+    st.title("⭐ TQQQ Volatility Strategy (v22td - After Tax)")
     
     last_day = get_last_closed_trading_day()
     
@@ -243,6 +243,7 @@ def main_app():
     # Metrics Summary
     st.subheader("Performance Summary (After-Tax)")
     
+    # Net of LTCG for B&H
     bh_q_net = bh_q - max(0, (bh_q - 10000) * ltcg_rate)
     bh_t_net = bh_t - max(0, (bh_t - 10000) * ltcg_rate)
 
@@ -254,44 +255,19 @@ def main_app():
     })
     st.table(res.style.format({"Final Value": "${:,.2f}", "Total Return": "{:.2f}%", "Taxes Paid": "${:,.2f}"}))
 
-    # --- LIGHTENED CHART SECTION ---
-    st.subheader("Strategy Growth vs. Benchmarks")
-    chart_df = sim_df.reset_index().copy()
-    
-    # Calculate Benchmarks (Normalized to INITIAL_INVESTMENT)
-    q_start = chart_df[f'{TICKER}_close'].iloc[0]
-    t_start = chart_df[f'{LEVERAGED_TICKER}_close'].iloc[0]
-    chart_df['B&H QQQ'] = (chart_df[f'{TICKER}_close'] / q_start) * float(INITIAL_INVESTMENT)
-    chart_df['B&H TQQQ'] = (chart_df[f'{LEVERAGED_TICKER}_close'] / t_start) * float(INITIAL_INVESTMENT)
-
-    melted_df = chart_df.melt(
-        id_vars=['Date'], 
-        value_vars=['Portfolio_Value', 'B&H QQQ', 'B&H TQQQ'],
-        var_name='Series', 
-        value_name='Value'
-    )
-
-    line_chart = alt.Chart(melted_df).mark_line().encode(
+    # Chart - LIGHTENED VERSION
+    st.subheader("Strategy Equity Curve")
+    chart_df = sim_df.reset_index()
+    chart = alt.Chart(chart_df).mark_line(
+        strokeWidth=1.5,       # Thinner line
+        opacity=0.7,           # Slight transparency to "lighten" the visual
+        color='#1f77b4'        # Classic blue
+    ).encode(
         x='Date:T',
-        y=alt.Y('Value:Q', title="Portfolio Value ($)"),
-        color=alt.Color('Series:N', scale=alt.Scale(
-            domain=['Portfolio_Value', 'B&H QQQ', 'B&H TQQQ'],
-            range=['#1f77b4', '#cccccc', '#e0e0e0']  # Primary Blue vs Soft Greys
-        ), legend=alt.Legend(title="Performance Indicator")),
-        strokeDash=alt.condition(
-            alt.datum.Series == 'Portfolio_Value',
-            alt.value([0]),          # Solid
-            alt.value([4, 2])        # Dashed for background
-        ),
-        opacity=alt.condition(
-            alt.datum.Series == 'Portfolio_Value',
-            alt.value(1.0),          # Highlight strategy
-            alt.value(0.35)          # Lighten background benchmarks
-        ),
-        tooltip=['Date', 'Series', 'Value']
+        y=alt.Y('Portfolio_Value:Q', title="Portfolio Value ($)"),
+        tooltip=['Date', 'Portfolio_Value']
     ).interactive()
-
-    st.altair_chart(line_chart, use_container_width=True)
+    st.altair_chart(chart, use_container_width=True)
 
     # Details
     col_a, col_b = st.columns(2)
