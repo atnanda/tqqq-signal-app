@@ -71,7 +71,6 @@ def fetch_historical_data(end_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER):
                         df_combined[metric.lower()] = all_data[metric][ticker]
         
         df_combined['close'] = df_combined[f'{TICKER}_close']
-        # Yield Spread Calculation
         df_combined['Yield_Spread'] = df_combined[f'{TNX_TICKER}_close'] - df_combined[f'{IRX_TICKER}_close']
         df_combined['Spread_Slope'] = df_combined['Yield_Spread'].diff(10)
         
@@ -131,7 +130,6 @@ def generate_historical_signals(df, LEVERAGED_TICKER, mini_vasl_mult,
     df['Trade_Ticker'] = 'CASH'
     df['Trade_Reason'] = 'N/A'
     
-    # Hysteresis Logic
     macro_lockout = False
     recovery_level = steepening_threshold - macro_buffer
     
@@ -139,11 +137,9 @@ def generate_historical_signals(df, LEVERAGED_TICKER, mini_vasl_mult,
         row = df.iloc[i]
         if pd.isna(row[f'SMA_{SMA_PERIOD}']): continue
         
-        # Update Macro Lockout State
         if macro_lockout and row['Spread_Slope'] <= recovery_level:
             macro_lockout = False
         
-        # Regime Logic
         if row['close'] >= row[f'SMA_{SMA_PERIOD}']: # BULL
             if (row['Yield_Spread'] > 0) and (row['Spread_Slope'] > steepening_threshold):
                 macro_lockout = True
@@ -166,8 +162,6 @@ def generate_historical_signals(df, LEVERAGED_TICKER, mini_vasl_mult,
         
     return df.dropna(subset=[f'SMA_{SMA_PERIOD}'])
 
-# --- Backtesting & UI Components (Original Styling) ---
-
 @st.cache_data(ttl=3600)
 def run_tax_sim(signals_df, start_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER, 
                 tax_rate, slippage_pct):
@@ -175,6 +169,10 @@ def run_tax_sim(signals_df, start_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER
     portfolio_value, shares, current_ticker = INITIAL_INVESTMENT, Decimal("0"), 'CASH'
     cost_basis, loss_carry, yearly_gain = Decimal("0"), Decimal("0"), Decimal("0")
     history, tax_logs, daily_values = [], [], []
+    
+    # Benchmarking data
+    q_start = Decimal(str(sim_df[f'{TICKER}_close'].iloc[0]))
+    t_start = Decimal(str(sim_df[f'{LEVERAGED_TICKER}_close'].iloc[0]))
     
     for i in range(len(sim_df)):
         row = sim_df.iloc[i]
@@ -211,6 +209,8 @@ def run_tax_sim(signals_df, start_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER
             yearly_gain = Decimal("0")
             
         sim_df.at[row.name, 'Portfolio_Value'] = float(portfolio_value)
+        sim_df.at[row.name, 'BH_QQQ'] = float((prices[TICKER] / q_start) * INITIAL_INVESTMENT)
+        sim_df.at[row.name, 'BH_TQQQ'] = float((prices[LEVERAGED_TICKER] / t_start) * INITIAL_INVESTMENT)
         daily_values.append({'Date': row.name.date(), 'Portfolio Value': float(portfolio_value)})
     
     return sim_df, pd.DataFrame(history), pd.DataFrame(tax_logs), pd.DataFrame(daily_values)
@@ -259,11 +259,9 @@ def plot_enhanced_signals(sig_df, trade_pairs, TICKER, start_date):
     )
     return (line + segments).interactive()
 
-# --- Main Interface ---
-
 def main():
-    st.set_page_config(layout="wide", page_title="TQQQ v28td_m Enhanced")
-    st.title("⭐ Leveraged Strategy v28td_m (Macro + DMI + Pro UI)")
+    st.set_page_config(layout="wide", page_title="TQQQ v28td_m Benchmarked")
+    st.title("⭐ Leveraged Strategy v28td_m (Macro + Benchmarking)")
     st.markdown("---")
     
     last_day = get_last_closed_trading_day()
@@ -297,7 +295,7 @@ def main():
     results, history, tax_logs, daily_values = run_tax_sim(sig_df, start_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER, st_tax, slippage)
     risk_metrics = calculate_risk_metrics(daily_values, history, INITIAL_INVESTMENT)
 
-    # === UI OUTPUT ===
+    # Signal Header
     st.subheader("🔴 Live Trading Signal")
     col1, col2, col3, col4 = st.columns(4)
     curr_ticker = history.iloc[-1]['Asset'] if not history.empty else "CASH"
@@ -308,12 +306,23 @@ def main():
     col4.metric("ADX", f"{inds['adx']:.1f}")
 
     st.markdown("---")
+    
+    # Performance Summary with Benchmarks
     st.markdown("## 📊 Performance Summary")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Final Value (Net)", f"${daily_values['Portfolio Value'].iloc[-1]:,.2f}")
-    m2.metric("Annualized Return", f"{risk_metrics['Annualized Return (%)']:.2f}%")
-    m3.metric("Max Drawdown", f"{risk_metrics['Max Drawdown (%)']:.2f}%")
-    m4.metric("Total Trades", f"{risk_metrics['Total Trades']}")
+    b1, b2, b3 = st.columns(3)
+    final_v = results['Portfolio_Value'].iloc[-1]
+    bh_q = results['BH_QQQ'].iloc[-1]
+    bh_t = results['BH_TQQQ'].iloc[-1]
+    
+    b1.metric("Strategy (Net)", f"${final_v:,.2f}", f"{(final_v/10000-1)*100:+.1f}%")
+    b2.metric(f"B&H {TICKER}", f"${bh_q:,.2f}", f"{(bh_q/10000-1)*100:+.1f}%")
+    b3.metric(f"B&H {LEVERAGED_TICKER}", f"${bh_t:,.2f}", f"{(bh_t/10000-1)*100:+.1f}%")
+    
+    st.markdown("### 📈 Risk Metrics")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Annualized Return", f"{risk_metrics['Annualized Return (%)']:.2f}%")
+    m2.metric("Max Drawdown", f"{risk_metrics['Max Drawdown (%)']:.2f}%")
+    m3.metric("Total Trades", f"{risk_metrics['Total Trades']}")
 
     st.markdown("## 📉 Interactive Performance Chart")
     trade_pairs = analyze_trade_pairs(history, data, TICKER)
