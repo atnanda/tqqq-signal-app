@@ -7,7 +7,7 @@ import numpy as np
 import warnings
 from decimal import Decimal, getcontext
 import pytz
-import altair as alt
+import alt as alt
 
 # --- Configuration (Constants) ---
 getcontext().prec = 50
@@ -266,18 +266,18 @@ def main():
     
     last_day = get_last_closed_trading_day()
     
+    # Default filter values (Hardcoded since UI inputs are removed)
+    adx_thresh = DEFAULT_ADX_THRESHOLD
+    di_spread = DEFAULT_DI_SPREAD_PCT
+    steep_thresh = DEFAULT_STEEPENING_THRESHOLD
+    m_buffer = DEFAULT_MACRO_BUFFER
+
     with st.sidebar:
         st.header("⚙️ Parameters")
         TICKER = st.text_input("Underlying", "QQQ")
         LEVERAGED_TICKER = st.text_input("Leveraged", "TQQQ")
         INVERSE_TICKER = st.text_input("Inverse", "SQQQ")
         start_date = st.date_input("Start Date", get_default_ytd_start_date(last_day))
-        
-        st.subheader("Filters")
-        adx_thresh = st.number_input("ADX Threshold", 0.0, 30.0, DEFAULT_ADX_THRESHOLD)
-        di_spread = st.number_input("DI Spread %", -1.0, 1.0, DEFAULT_DI_SPREAD_PCT)
-        steep_thresh = st.number_input("Steepening Threshold", 0.0, 1.0, DEFAULT_STEEPENING_THRESHOLD)
-        m_buffer = st.number_input("Macro Buffer", 0.0, 0.1, DEFAULT_MACRO_BUFFER)
         
         st.subheader("Costs & Tax")
         slippage = st.number_input("Slippage (%)", 0.0, 1.0, 0.2) / 100
