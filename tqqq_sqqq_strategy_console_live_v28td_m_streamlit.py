@@ -7,7 +7,7 @@ import numpy as np
 import warnings
 from decimal import Decimal, getcontext
 import pytz
-import alt as alt
+import altair as alt
 
 # --- Configuration (Constants) ---
 getcontext().prec = 50
@@ -266,7 +266,7 @@ def main():
     
     last_day = get_last_closed_trading_day()
     
-    # Default filter values (Hardcoded since UI inputs are removed)
+    # Static logic for filters previously on the UI
     adx_thresh = DEFAULT_ADX_THRESHOLD
     di_spread = DEFAULT_DI_SPREAD_PCT
     steep_thresh = DEFAULT_STEEPENING_THRESHOLD
