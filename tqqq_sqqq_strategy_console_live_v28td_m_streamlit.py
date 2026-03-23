@@ -116,8 +116,6 @@ def calculate_indicators(data_daily, target_date, current_price):
         'spread_slope': df['Spread_Slope'].iloc[-1]
     }
 
-# --- Signal Generation (Updated with v28td_m Logic) ---
-
 @st.cache_data(ttl=3600)
 def generate_historical_signals(df, LEVERAGED_TICKER, mini_vasl_mult, 
                                 adx_threshold, di_spread_pct, steepening_threshold, macro_buffer):
@@ -131,42 +129,44 @@ def generate_historical_signals(df, LEVERAGED_TICKER, mini_vasl_mult,
     df['ATR'] = calculate_true_range_and_atr(df, ATR_PERIOD)
     
     df['Trade_Ticker'] = 'CASH'
+    df['Trade_Reason'] = 'N/A'
+    
+    # Hysteresis Logic
     macro_lockout = False
     recovery_level = steepening_threshold - macro_buffer
     
-    # We use a loop here because Macro Lockout is a stateful (hysteresis) logic
     for i in range(len(df)):
         row = df.iloc[i]
         if pd.isna(row[f'SMA_{SMA_PERIOD}']): continue
         
-        # Update Macro State
+        # Update Macro Lockout State
         if macro_lockout and row['Spread_Slope'] <= recovery_level:
             macro_lockout = False
         
-        # Regime Check
+        # Regime Logic
         if row['close'] >= row[f'SMA_{SMA_PERIOD}']: # BULL
             if (row['Yield_Spread'] > 0) and (row['Spread_Slope'] > steepening_threshold):
                 macro_lockout = True
-                ticker = 'CASH'
+                ticker, reason = 'CASH', "Macro Steepening"
             elif macro_lockout:
-                ticker = 'CASH'
-            elif row['ADX'] < adx_threshold: ticker = 'CASH'
-            elif row['DMP'] <= (row['DMN'] * (1 + di_spread_pct)): ticker = 'CASH'
-            elif row['close'] < (row[f'EMA_{EMA_PERIOD}'] - (ATR_MULTIPLIER * row['ATR'])): ticker = 'CASH'
-            elif row['close'] < (row[f'EMA_{EMA_PERIOD}'] - (mini_vasl_mult * row['ATR'])): ticker = 'CASH'
-            elif row[f'EMA_{EMA_PERIOD}'] < row[f'SMA_{SMA_PERIOD}']: ticker = 'CASH'
-            else: ticker = LEVERAGED_TICKER
+                ticker, reason = 'CASH', f"Macro Lockout (<{recovery_level:.2f})"
+            elif row['ADX'] < adx_threshold: ticker, reason = 'CASH', "ADX Filter"
+            elif row['DMP'] <= (row['DMN'] * (1 + di_spread_pct)): ticker, reason = 'CASH', "DMI Filter"
+            elif row['close'] < (row[f'EMA_{EMA_PERIOD}'] - (ATR_MULTIPLIER * row['ATR'])): ticker, reason = 'CASH', "VASL Stop"
+            elif row['close'] < (row[f'EMA_{EMA_PERIOD}'] - (mini_vasl_mult * row['ATR'])): ticker, reason = 'CASH', "Mini-VASL Stop"
+            else: ticker, reason = LEVERAGED_TICKER, "Bull Trend"
         else: # BEAR
             if row[f'EMA_{EMA_PERIOD}'] > row[f'SMA_{SMA_SHORT_PERIOD}'] and row['SMA_20_slope'] > 0:
-                ticker = LEVERAGED_TICKER
+                ticker, reason = LEVERAGED_TICKER, "Bear Recovery"
             else:
-                ticker = 'CASH'
+                ticker, reason = 'CASH', "Bear Regime"
         
         df.iloc[i, df.columns.get_loc('Trade_Ticker')] = ticker
+        df.iloc[i, df.columns.get_loc('Trade_Reason')] = reason
         
     return df.dropna(subset=[f'SMA_{SMA_PERIOD}'])
 
-# --- Backtesting Engine ---
+# --- Backtesting & UI Components (Original Styling) ---
 
 @st.cache_data(ttl=3600)
 def run_tax_sim(signals_df, start_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER, 
@@ -187,14 +187,14 @@ def run_tax_sim(signals_df, start_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER
                 portfolio_value = shares * sell_price
                 realized_gain = portfolio_value - cost_basis
                 yearly_gain += realized_gain
-                history.append({'Date': row.name.date(), 'Action': f"SELL {current_ticker}", 'Asset': current_ticker, 'Price': float(sell_price), 'Portfolio Value': float(portfolio_value), 'Realized P/L': float(realized_gain)})
+                history.append({'Date': row.name.date(), 'Action': f"SELL {current_ticker}", 'Asset': current_ticker, 'Price': float(sell_price), 'Portfolio Value': float(portfolio_value), 'Realized P/L': float(realized_gain), 'Reason': row['Trade_Reason']})
             
             if target != 'CASH':
                 buy_price = prices[target]
                 effective_capital = portfolio_value * (Decimal("1") - Decimal(str(slippage_pct)))
                 shares = effective_capital / buy_price
                 cost_basis = portfolio_value
-                history.append({'Date': row.name.date(), 'Action': f"BUY {target}", 'Asset': target, 'Price': float(buy_price), 'Portfolio Value': float(portfolio_value), 'Realized P/L': 0.0})
+                history.append({'Date': row.name.date(), 'Action': f"BUY {target}", 'Asset': target, 'Price': float(buy_price), 'Portfolio Value': float(portfolio_value), 'Realized P/L': 0.0, 'Reason': row['Trade_Reason']})
             current_ticker = target
         
         if current_ticker != 'CASH': portfolio_value = shares * prices[current_ticker]
@@ -205,7 +205,7 @@ def run_tax_sim(signals_df, start_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER
             if tax_due > 0:
                 portfolio_value -= tax_due
                 if current_ticker != 'CASH': shares = portfolio_value / prices[current_ticker]
-                history.append({'Date': row.name.date(), 'Action': "ANNUAL TAX", 'Asset': 'CASH', 'Portfolio Value': float(portfolio_value), 'Realized P/L': float(-tax_due)})
+                history.append({'Date': row.name.date(), 'Action': "ANNUAL TAX", 'Asset': 'CASH', 'Portfolio Value': float(portfolio_value), 'Realized P/L': float(-tax_due), 'Reason': 'Tax Payment'})
             tax_logs.append({'Year': row.name.year, 'Realized Gain': float(yearly_gain), 'Tax Paid': float(tax_due)})
             loss_carry = max(Decimal("0"), loss_carry - yearly_gain) if yearly_gain > 0 else loss_carry + abs(yearly_gain)
             yearly_gain = Decimal("0")
@@ -216,33 +216,54 @@ def run_tax_sim(signals_df, start_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER
     return sim_df, pd.DataFrame(history), pd.DataFrame(tax_logs), pd.DataFrame(daily_values)
 
 def calculate_risk_metrics(daily_values_df, history_df, initial_investment):
-    daily_values_df = daily_values_df.set_index('Date')
-    daily_values_df['Daily_Return'] = daily_values_df['Portfolio Value'].pct_change()
-    final_value = daily_values_df['Portfolio Value'].iloc[-1]
-    years = len(daily_values_df) / 252
-    
-    # Metrics
-    ann_ret = ((final_value / float(initial_investment)) ** (1/years) - 1) * 100 if years > 0 else 0
-    max_dd = ((daily_values_df['Portfolio Value'] - daily_values_df['Portfolio Value'].expanding().max()) / daily_values_df['Portfolio Value'].expanding().max()).min() * 100
+    dv = daily_values_df.set_index('Date')
+    dv['Daily_Return'] = dv['Portfolio Value'].pct_change()
+    final_v = dv['Portfolio Value'].iloc[-1]
+    years = len(dv) / 252
+    ann_ret = ((final_v / float(initial_investment)) ** (1/years) - 1) * 100 if years > 0 else 0
+    max_dd = ((dv['Portfolio Value'] - dv['Portfolio Value'].expanding().max()) / dv['Portfolio Value'].expanding().max()).min() * 100
     
     return {
-        'Total Return (%)': (final_value / float(initial_investment) - 1) * 100,
+        'Total Return (%)': (final_v / float(initial_investment) - 1) * 100,
         'Annualized Return (%)': ann_ret,
         'Max Drawdown (%)': max_dd,
         'Total Trades': len(history_df[history_df['Action'].str.startswith('BUY')])
     }
 
-def plot_v28_signals(signals_df, TICKER, start_date):
-    plot_data = signals_df[signals_df.index.date >= start_date].copy()
-    base = alt.Chart(plot_data.reset_index()).encode(x='Date:T')
-    line = base.mark_line(color='gray', opacity=0.5).encode(y='close:Q')
-    return line.interactive()
+def analyze_trade_pairs(history_df, full_data, TICKER):
+    trade_pairs = []
+    trades = history_df[history_df['Action'].str.startswith(('BUY', 'SELL'))].copy()
+    buy_trade = None
+    for _, row in trades.iterrows():
+        if row['Action'].startswith('BUY'):
+            buy_trade = {'date': pd.to_datetime(row['Date']), 'val': row['Portfolio Value'], 'price': full_data.loc[pd.to_datetime(row['Date']), 'close']}
+        elif row['Action'].startswith('SELL') and buy_trade:
+            pl = row['Portfolio Value'] - buy_trade['val']
+            trade_pairs.append({'buy_date': buy_trade['date'], 'sell_date': pd.to_datetime(row['Date']), 'buy_price': buy_trade['price'], 'sell_price': full_data.loc[pd.to_datetime(row['Date']), 'close'], 'is_profitable': pl >= 0})
+            buy_trade = None
+    return trade_pairs
 
-# --- Main App Interface ---
+def plot_enhanced_signals(sig_df, trade_pairs, TICKER, start_date):
+    plot_data = sig_df[sig_df.index.date >= start_date].copy()
+    base = alt.Chart(plot_data.reset_index()).encode(x='Date:T')
+    line = base.mark_line(color='gray', opacity=0.4).encode(y=alt.Y('close:Q', title='Price'))
+    
+    df_segments = []
+    for i, t in enumerate(trade_pairs):
+        df_segments.append({'tid': i, 'Date': t['buy_date'], 'Price': t['buy_price'], 'Cat': t['is_profitable']})
+        df_segments.append({'tid': i, 'Date': t['sell_date'], 'Price': t['sell_price'], 'Cat': t['is_profitable']})
+    
+    segments = alt.Chart(pd.DataFrame(df_segments)).mark_line(size=3).encode(
+        x='Date:T', y='Price:Q', detail='tid:N',
+        color=alt.condition(alt.datum.Cat == True, alt.value('green'), alt.value('red'))
+    )
+    return (line + segments).interactive()
+
+# --- Main Interface ---
 
 def main():
-    st.set_page_config(layout="wide", page_title="TQQQ v28td_m Pro")
-    st.title("🚀 Leveraged Strategy v28td_m (Macro + DMI Filter)")
+    st.set_page_config(layout="wide", page_title="TQQQ v28td_m Enhanced")
+    st.title("⭐ Leveraged Strategy v28td_m (Macro + DMI + Pro UI)")
     st.markdown("---")
     
     last_day = get_last_closed_trading_day()
@@ -276,22 +297,35 @@ def main():
     results, history, tax_logs, daily_values = run_tax_sim(sig_df, start_date, TICKER, LEVERAGED_TICKER, INVERSE_TICKER, st_tax, slippage)
     risk_metrics = calculate_risk_metrics(daily_values, history, INITIAL_INVESTMENT)
 
-    # UI Display
+    # === UI OUTPUT ===
     st.subheader("🔴 Live Trading Signal")
-    c1, c2, c3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     curr_ticker = history.iloc[-1]['Asset'] if not history.empty else "CASH"
-    c1.metric("Current Signal", curr_ticker)
-    c2.metric("Yield Spread", f"{inds['yield_spread']:.4f}")
-    c3.metric("Spread Slope", f"{inds['spread_slope']:.4f}")
+    status_color = "🟢" if curr_ticker != "CASH" else "🟡"
+    col1.markdown(f"## {status_color} **{curr_ticker}**")
+    col2.metric("Yield Spread", f"{inds['yield_spread']:.4f}")
+    col3.metric("Spread Slope", f"{inds['spread_slope']:.4f}")
+    col4.metric("ADX", f"{inds['adx']:.1f}")
 
-    st.markdown("### 📊 Performance Summary")
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Final Value", f"${daily_values['Portfolio Value'].iloc[-1]:,.2f}")
+    st.markdown("---")
+    st.markdown("## 📊 Performance Summary")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Final Value (Net)", f"${daily_values['Portfolio Value'].iloc[-1]:,.2f}")
     m2.metric("Annualized Return", f"{risk_metrics['Annualized Return (%)']:.2f}%")
     m3.metric("Max Drawdown", f"{risk_metrics['Max Drawdown (%)']:.2f}%")
+    m4.metric("Total Trades", f"{risk_metrics['Total Trades']}")
 
-    st.altair_chart(plot_v28_signals(sig_df, TICKER, start_date), use_container_width=True)
-    st.dataframe(history.tail(20), use_container_width=True)
+    st.markdown("## 📉 Interactive Performance Chart")
+    trade_pairs = analyze_trade_pairs(history, data, TICKER)
+    st.altair_chart(plot_enhanced_signals(sig_df, trade_pairs, TICKER, start_date), use_container_width=True)
+
+    col_h, col_t = st.columns(2)
+    with col_h:
+        with st.expander("🧾 Trade History"):
+            st.dataframe(history, use_container_width=True, hide_index=True)
+    with col_t:
+        with st.expander("💰 Tax Summary"):
+            st.dataframe(tax_logs, use_container_width=True, hide_index=True)
 
 if __name__ == "__main__":
     main()
